@@ -30,21 +30,18 @@ Screenshots
 Differences from Original Version
 ---
 1. Cross-platform, of course.
-2. The original launcher updates git repo, kills existing processes, updates pip, updates electron resources, and restarts adb on startup. This version only updates the repo. If launched multiple times, it only refocuses the existing window.
-3. Python package versions differ from original, but it works fine. Automatic pip updates are disabled. If upstream adds a requirements file, pip updates can be implemented.
+2. The original launcher updates git repo, kills existing processes, updates pip, updates electron resources, and restarts adb on startup. This version updates the repo and installs pip dependencies according to the `deploy` config; if launched multiple times, it only refocuses the existing window.
+3. Python package versions differ from original, but it works fine. Automatic pip updates are enabled by default.
 4. Restarting and replacing adb is tricky, not implemented.
 5. Directory structure has been modified slightly.
 
 Technical Details
 ---
-1. Compiled MXNet. Since PyPI versions don't work, had to compile it myself. MXNet's CMake is... challenging, and I had to add some patches. Achieved backwards-compatible builds for all platforms. See https://github.com/swordfeng/mxnet-build.
-2. Used `uv` to download portable Python, so it can run anywhere.
-3. Updated many Python package versions since lots of packages can't compile on arm64 Mac. See `requirements.in`.
-4. Following binss's blog, chose MXNet 1.9.1 and a newer NumPy version. Interestingly, this NumPy version removed `np.bool`, so monkey-patched MXNet to add this type back.
-5. Since cnocr only accepts mxnet \[1.5.0, 1.7.0\), modified the version when packaging.
-6. Used Tauri for the shell. Original GUI's Electron could probably work on Mac, but it looked messy so I gave up after brief research.
-7. Packaging scripts, all on GitHub Actions, see `.github/workflows`.
-8. Removed some duplicate files. Not sure why *-nix symlinks were all packed as copies, or if it was due to `cp` with hardlinks? Anyway, just deduped with hardlinks. Too lazy to investigate deeper compression.
+1. Used `uv` to download portable Python 3.14.3, so it can run anywhere.
+2. Packaged dependencies are now installed from the repo-root `requirements.txt`, instead of relying on the old `deploy/launcher2/requirements.txt`.
+3. Used Tauri for the shell. Original GUI's Electron could probably work on Mac, but it looked messy so I gave up after brief research.
+4. Packaging scripts, all on GitHub Actions, see `.github/workflows`.
+5. Removed some duplicate files. Not sure why *-nix symlinks were all packed as copies, or if it was due to `cp` with hardlinks? Anyway, just deduped with hardlinks. Too lazy to investigate deeper compression.
 
 Directory Structure
 ---

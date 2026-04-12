@@ -87,8 +87,10 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(&str)) -> Result<()> {
     // Similar setup to deploy/installer.py
     status_updater("Cleaning up config files");
     atomic_failure_cleanup("./config")?;
+    ensure_python_dependency_config()?;
     status_updater("Updating ALAS");
-    git_update(status_updater)?;
+    git_update(&mut status_updater)?;
+    pip_install(&mut status_updater)?;
     Ok(())
 }
 
@@ -139,20 +141,7 @@ fn pipe_lines(read: impl Read + Send + 'static, tx: Sender<(bool, String)>, is_e
     });
 }
 
-fn git_update(mut status_updater: impl FnMut(&str)) -> Result<()> {
-    // Decorate execute() to get fetch progress
-    let script = r#"
-import deploy.git
-def decorate_execute(fn):
-    def new_fn(*args, **kwargs):
-        if len(args) >= 1 and ' fetch ' in args[0] and '--progress' not in args[0]:
-            args = (args[0].replace(' fetch ', ' fetch --progress '),) + args[1:]
-        return fn(*args, **kwargs)
-    return new_fn
-gm = deploy.git.GitManager()
-gm.execute = decorate_execute(gm.execute)
-gm.git_install()
-"#;
+fn run_python_script(script: &str, mut status_updater: impl FnMut(&str), prefix: &str) -> Result<()> {
     // Spawn the child with piped stdout/stderr so we can tee them.
     let mut child = Command::new("python")
         .args(["-c", script])
@@ -183,7 +172,7 @@ gm.git_install()
     while let Ok((is_err, line)) = rx.recv() {
         if line.contains("=====") {
             let sanitized = line.replace("=", " ").trim().to_owned();
-            status_updater(&format!("Updating ALAS: {sanitized}"));
+            status_updater(&format!("{prefix}: {sanitized}"));
         } else if line.contains("objects:") || line.contains("deltas:") || line.contains("files:") {
             let sanitized = line.trim().to_owned();
             let mut n = 0usize;
@@ -191,8 +180,16 @@ gm.git_install()
                 n = (precentage / 2) as usize;
             }
             let bar = "=".repeat(n) + &" ".repeat(50 - n);
-            status_updater(&format!("Updating ALAS: {sanitized}\n[{bar}]"));
+            status_updater(&format!("{prefix}: {sanitized}\n[{bar}]"));
+        } else if line.contains("Package") && line.contains("Version") {
+            // pip progress or list
+        } else if line.starts_with("Collecting") {
+            let sanitized = line.trim().to_owned();
+            status_updater(&format!("{prefix}: {sanitized}"));
+        } else if line.starts_with("Installing collected packages") {
+            status_updater(&format!("{prefix}: Installing packages..."));
         }
+
         if is_err {
             warn!("{line}");
             last_err = line;
@@ -205,10 +202,89 @@ gm.git_install()
     let status = child.wait()?;
     if !status.success() {
         if last_err.is_empty() {
-            last_err = "Failed to update repository".to_owned();
+            last_err = format!("Failed to run {prefix}");
         }
         return Err(anyhow!(last_err));
     }
+    Ok(())
+}
+
+fn git_update(status_updater: impl FnMut(&str)) -> Result<()> {
+    // Decorate execute() to get fetch progress
+    let script = r#"
+import deploy.git
+def decorate_execute(fn):
+    def new_fn(*args, **kwargs):
+        if len(args) >= 1 and ' fetch ' in args[0] and '--progress' not in args[0]:
+            args = (args[0].replace(' fetch ', ' fetch --progress '),) + args[1:]
+        return fn(*args, **kwargs)
+    return new_fn
+gm = deploy.git.GitManager()
+gm.execute = decorate_execute(gm.execute)
+gm.git_install()
+"#;
+    run_python_script(script, status_updater, "Updating ALAS")
+}
+
+fn pip_install(status_updater: impl FnMut(&str)) -> Result<()> {
+    let script = r#"
+import deploy.pip
+pm = deploy.pip.PipManager()
+pm.pip_install()
+"#;
+    run_python_script(script, status_updater, "Updating Dependencies")
+}
+
+fn ensure_python_dependency_config() -> Result<()> {
+    let path = "./config/deploy.yaml";
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    let mut changed = false;
+    let mut found_install_dependencies = false;
+    let mut found_requirements_file = false;
+    let mut output = String::with_capacity(content.len());
+
+    for line in content.lines() {
+        let indent_len = line.len() - line.trim_start().len();
+        let indent = &line[..indent_len];
+        if line.trim_start().starts_with("InstallDependencies:") {
+            found_install_dependencies = true;
+            if line.trim() != "InstallDependencies: true" {
+                output.push_str(indent);
+                output.push_str("InstallDependencies: true");
+                changed = true;
+            } else {
+                output.push_str(line);
+            }
+        } else if line.trim_start().starts_with("RequirementsFile:") {
+            found_requirements_file = true;
+            if line.trim() != "RequirementsFile: ./requirements.txt" {
+                output.push_str(indent);
+                output.push_str("RequirementsFile: ./requirements.txt");
+                changed = true;
+            } else {
+                output.push_str(line);
+            }
+        } else {
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+
+    if changed {
+        fs::write(path, output)?;
+        info!("Updated Deploy.Python dependency settings in {path}");
+    } else {
+        if !found_install_dependencies {
+            warn!("InstallDependencies not found in {path}");
+        }
+        if !found_requirements_file {
+            warn!("RequirementsFile not found in {path}");
+        }
+    }
+
     Ok(())
 }
 

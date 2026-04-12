@@ -9,7 +9,7 @@ on:
 env:
   UV_MANAGED_PYTHON: 1
   UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/python
-  UV_PYTHON: 3.8.20
+  UV_PYTHON: 3.14.3
 
 jobs:
   package:
@@ -21,13 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest, windows-latest]
-        include:
-          - os: ubuntu-22.04
-            python-platform: linux_x86_64
-          - os: macos-latest
-            python-platform: macosx_14_0_arm64
-          - os: windows-latest
-            python-platform: win_amd64
 
     steps:
       - name: Install Tauri dependencies (Ubuntu only)
@@ -50,15 +43,12 @@ jobs:
         run: cargo build --verbose --release
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-      - name: Install Python and dependencies with customized MXNet
+      - name: Install Python and dependencies
         shell: bash
         run: |
           export PYTHON_PREFIX=$(uv run python -c 'import sys; print(sys.exec_prefix)')
           echo "PYTHON_PREFIX=$PYTHON_PREFIX" >> $GITHUB_ENV
-          curl -L -O https://github.com/swordfeng/mxnet-build/releases/download/rev1/mxnet-1.9.1-cp38-cp38-${{ matrix.python-platform }}.whl
-          UV_PYTHON= uvx change_wheel_version mxnet-1.9.1-cp38-cp38-${{ matrix.python-platform }}.whl --version 1.6.99
-          uv pip install --prefix "$PYTHON_PREFIX" --no-deps mxnet-1.6.99-cp38-cp38-${{ matrix.python-platform }}.whl
-          uv pip install --prefix "$PYTHON_PREFIX" -r requirements.in
+          uv pip install --prefix "$PYTHON_PREFIX" -r requirements.txt
       - name: Shrink python site-packages
         shell: bash
         run: |
@@ -149,6 +139,7 @@ jobs:
             cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
             ln toolkit/libexec/git-core/git toolkit/bin/
             cp -r $PYTHON_PREFIX/* toolkit/
+            cp ../requirements.txt requirements.txt
             mkdir -p config
             cp ../deploy.unix.yaml config/deploy.yaml
 
@@ -188,6 +179,7 @@ jobs:
             cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
             ln toolkit/libexec/git-core/git toolkit/bin/
             cp -r $PYTHON_PREFIX/* toolkit/
+            cp ../requirements.txt requirements.txt
             find toolkit/ -type f -name '*.so*' -or -type f -executable -exec strip --strip-unneeded {} \;
             mkdir -p config
             cp ../deploy.unix.yaml config/deploy.yaml
@@ -225,6 +217,7 @@ jobs:
             $git_files = @("git.exe","git-remote-http.exe","git-remote-https.exe","libcurl-4.dll") | ForEach-Object { "..\git\mingw64\bin\" + $_ }
             ..\pedeps\bin\copypedeps.exe -r $git_files toolkit\git\mingw64\bin\
             cp -r ($env:PYTHON_PREFIX + "\*") toolkit\
+            cp ..\requirements.txt requirements.txt
             mkdir -ea 0 config
             cp ..\deploy.windows.yaml config\deploy.yaml
             cp ..\target\release\alas-launcher.exe alas-launcher.exe
