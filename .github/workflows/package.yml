@@ -119,7 +119,7 @@ jobs:
             tar -xvf adb.zip
       - name: Get ALAS
         run: |
-          git clone https://github.com/LmeSzinc/AzurLaneAutoScript.git --depth=1
+          git clone https://github.com/wess09/AzurLaneAutoScript.git --depth=1
       - name: Distribute
         uses: knicknic/os-specific-run@v1.0.3
         with:
