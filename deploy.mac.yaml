@@ -1,7 +1,7 @@
 Deploy:
   Git:
     # URL of AzurLaneAutoScript repository
-    # [CN user] Use 'https://git.nanoda.work/git/AzurLaneAutoScript' for faster and more stable download
+    # [CN user] Use 'git://git.lyoko.io/AzurLaneAutoScript' for faster and more stable download
     # [Other] Use 'https://git.nanoda.work/git/AzurLaneAutoScript'
     Repository: https://git.nanoda.work/git/AzurLaneAutoScript
     # Branch of Alas
@@ -37,15 +37,14 @@ Deploy:
     # URL of pypi mirror
     # [CN user] Use 'https://mirrors.aliyun.com/pypi/simple' for faster and more stable download
     # [Other] Use null
-    PypiMirror: https://mirrors.aliyun.com/pypi/simple
+    PypiMirror: null
     # Install dependencies at startup
     # [In most cases] Use true
     InstallDependencies: true
     # Path to requirements.txt
     # [In most cases] Use 'requirements.txt'
     # [In AidLux] Use './deploy/AidLux/{version}/requirements.txt', version is default to 0.92
-    RequirementsFile: ./requirements-linux.txt
-
+    RequirementsFile: ./requirements-macos.txt
   Adb:
     # Filepath of ADB executable `adb.exe`
     # [Easy installer] Use './toolkit/Lib/site-packages/adbutils/binaries/adb.exe'
@@ -135,7 +134,7 @@ Deploy:
     # 'en-US' for English
     # 'ja-JP' for Japanese
     # 'zh-TW' for Chinese traditional
-    Language: zh-CN
+    Language: en-US
     # Theme of web ui
     # 'default' for light theme
     # 'dark' for dark theme

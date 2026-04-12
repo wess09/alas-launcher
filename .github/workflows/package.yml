@@ -141,7 +141,7 @@ jobs:
             cp -r $PYTHON_PREFIX/* toolkit/
             cp ../requirements.txt requirements.txt
             mkdir -p config
-            cp ../deploy.unix.yaml config/deploy.yaml
+            cp ../deploy.mac.yaml config/deploy.yaml
 
             cd ${{ github.workspace }}
             mkdir -p AzurLaneAutoScript.app/Contents/MacOS
@@ -157,7 +157,7 @@ jobs:
               t.add('AzurLaneAutoScript.app')
             EOF
 
-            cp deploy.unix-cn.yaml AzurLaneAutoScript.app/Contents/AzurLaneAutoScript/config/deploy.yaml
+            cp deploy.mac-cn.yaml AzurLaneAutoScript.app/Contents/AzurLaneAutoScript/config/deploy.yaml
             uv run python - <<EOF
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:

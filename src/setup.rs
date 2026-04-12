@@ -308,6 +308,7 @@ gm.git_install()
 }
 
 fn pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
+    let requirements_file = get_requirements_file_path();
     let script = r#"
 import deploy.pip
 pm = deploy.pip.PipManager()
@@ -317,7 +318,7 @@ pm.pip_install()
         script,
         status_updater,
         ScriptPhase::Dependencies {
-            total_packages: count_required_packages("./requirements.txt"),
+            total_packages: count_required_packages(&requirements_file),
         },
     )
 }
@@ -330,7 +331,6 @@ fn ensure_python_dependency_config() -> Result<()> {
 
     let mut changed = false;
     let mut found_install_dependencies = false;
-    let mut found_requirements_file = false;
     let mut output = String::with_capacity(content.len());
 
     for line in content.lines() {
@@ -341,15 +341,6 @@ fn ensure_python_dependency_config() -> Result<()> {
             if line.trim() != "InstallDependencies: true" {
                 output.push_str(indent);
                 output.push_str("InstallDependencies: true");
-                changed = true;
-            } else {
-                output.push_str(line);
-            }
-        } else if line.trim_start().starts_with("RequirementsFile:") {
-            found_requirements_file = true;
-            if line.trim() != "RequirementsFile: ./requirements.txt" {
-                output.push_str(indent);
-                output.push_str("RequirementsFile: ./requirements.txt");
                 changed = true;
             } else {
                 output.push_str(line);
@@ -366,9 +357,6 @@ fn ensure_python_dependency_config() -> Result<()> {
     } else {
         if !found_install_dependencies {
             warn!("InstallDependencies not found in {path}");
-        }
-        if !found_requirements_file {
-            warn!("RequirementsFile not found in {path}");
         }
     }
 
@@ -513,6 +501,18 @@ fn count_required_packages(path: &str) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn get_requirements_file_path() -> String {
+    get_deploy_config()
+        .as_ref()
+        .and_then(|config| config.get("Deploy"))
+        .and_then(|deploy| deploy.get("Python"))
+        .and_then(|python| python.get("RequirementsFile"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_owned())
+        .unwrap_or_else(|| "./requirements.txt".to_owned())
 }
 
 fn find_percentage(s: &str) -> Option<u8> {
