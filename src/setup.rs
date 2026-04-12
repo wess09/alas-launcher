@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::env::set_current_dir;
@@ -12,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SplashUpdate {
     pub subtitle: String,
     pub title: String,

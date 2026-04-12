@@ -14,6 +14,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
+use serde_json::to_string;
 use tauri::{
     webview::{PageLoadEvent, PageLoadPayload},
     Manager, Url, WebviewWindow,
@@ -87,11 +88,11 @@ fn main() -> Result<()> {
                     let backend = backend.clone();
                     thread::spawn(move || {
                         let splash = app_handle.get_webview_window("splash").unwrap();
+                        initialize_splash(&splash);
                         let last_progress = Cell::new(0u8);
                         let mut status_updater = |update: SplashUpdate| {
                             last_progress.set(update.progress);
-                            let url = Url::parse(&text_to_splash(&update)).unwrap();
-                            splash.navigate(url).unwrap();
+                            update_splash(&splash, &update);
                         };
                         status_updater(SplashUpdate::loading(
                             "Starting up",
@@ -226,34 +227,23 @@ if (!window.alas_launcher_injected) {
     }
 }
 
-fn text_to_splash(update: &SplashUpdate) -> String {
-    let badge_class = if update.is_error {
-        "badge badge-err"
-    } else {
-        "badge"
-    };
-    let badge_text = if update.is_error { "Error" } else { "Loading" };
-    let indicator = if update.is_error {
-        "<div class=\"err-dot\">!</div>"
-    } else {
-        "<div class=\"spinner\"></div>"
-    };
-    let progress_class = if update.is_error {
-        "prog-fill prog-fill-err"
-    } else {
-        "prog-fill"
-    };
-    let progress_pct_class = if update.is_error {
-        "prog-pct prog-pct-err"
-    } else {
-        "prog-pct"
-    };
-    let progress_meta = if update.is_error {
-        "Stopped during initialization"
-    } else {
-        "The window opens automatically when ready"
-    };
-    let detail_html = escape_html(&update.detail).replace('\n', "<br>");
+fn initialize_splash(splash: &WebviewWindow) {
+    let html_json = to_string(&splash_shell_html()).unwrap();
+    let injected = format!("document.open();document.write({html_json});document.close();");
+    if let Err(e) = splash.eval(&injected) {
+        error!("Failed to initialize splash page: {:?}", e);
+    }
+}
+
+fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
+    let payload = to_string(update).unwrap();
+    let script = format!("window.__ALAS_SPLASH_UPDATE && window.__ALAS_SPLASH_UPDATE({payload});");
+    if let Err(e) = splash.eval(&script) {
+        error!("Failed to update splash page: {:?}", e);
+    }
+}
+
+fn splash_shell_html() -> String {
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -389,6 +379,7 @@ fn text_to_splash(update: &SplashUpdate) -> String {
     color: var(--color-text-secondary);
     margin: 0;
     line-height: 1.45;
+    white-space: pre-line;
   }}
   .prog-wrap {{
     margin-top: 16px;
@@ -492,58 +483,69 @@ fn text_to_splash(update: &SplashUpdate) -> String {
       <div class="card-header">
         <div class="brand-text">
           <strong>ALAS Launcher</strong>
-          <span>{subtitle}</span>
+          <span id="subtitle"></span>
         </div>
-        <div class="{badge_class}">{badge_text}</div>
+        <div id="badge" class="badge">Loading</div>
       </div>
       <div class="divider"></div>
       <div class="status-row">
-        {indicator}
+        <div id="spinner" class="spinner"></div>
+        <div id="error-dot" class="err-dot" style="display:none;">!</div>
         <div class="status-body">
-          <h2>{title}</h2>
-          <p>{detail_html}</p>
+          <h2 id="title"></h2>
+          <p id="detail"></p>
         </div>
       </div>
       <div class="prog-wrap">
         <div class="prog-track">
-          <div class="{progress_class}" style="width: {progress}%;"></div>
+          <div id="progress-fill" class="prog-fill" style="width: 0%;"></div>
         </div>
         <div class="prog-meta">
-          <span>{progress_meta}</span>
-          <span class="{progress_pct_class}">{progress}%</span>
+          <span id="progress-meta">The window opens automatically when ready</span>
+          <span id="progress-pct" class="prog-pct">0%</span>
         </div>
       </div>
     </div>
   </div>
+  <script>
+    window.__ALAS_SPLASH_UPDATE = function (payload) {{
+      const badge = document.getElementById('badge');
+      const spinner = document.getElementById('spinner');
+      const errorDot = document.getElementById('error-dot');
+      const progressFill = document.getElementById('progress-fill');
+      const progressPct = document.getElementById('progress-pct');
+
+      document.getElementById('subtitle').textContent = payload.subtitle || '';
+      document.getElementById('title').textContent = payload.title || '';
+      document.getElementById('detail').textContent = payload.detail || '';
+      document.getElementById('progress-meta').textContent = payload.is_error
+        ? 'Stopped during initialization'
+        : 'The window opens automatically when ready';
+
+      const progress = Math.max(0, Math.min(100, Number(payload.progress || 0)));
+      progressFill.style.width = progress + '%';
+      progressPct.textContent = progress + '%';
+
+      if (payload.is_error) {{
+        badge.textContent = 'Error';
+        badge.className = 'badge badge-err';
+        spinner.style.display = 'none';
+        errorDot.style.display = 'flex';
+        progressFill.className = 'prog-fill prog-fill-err';
+        progressPct.className = 'prog-pct prog-pct-err';
+      }} else {{
+        badge.textContent = 'Loading';
+        badge.className = 'badge';
+        spinner.style.display = 'block';
+        errorDot.style.display = 'none';
+        progressFill.className = 'prog-fill';
+        progressPct.className = 'prog-pct';
+      }}
+    }};
+  </script>
 </body>
-</html>"#,
-        subtitle = escape_html(&update.subtitle),
-        badge_class = badge_class,
-        badge_text = badge_text,
-        indicator = indicator,
-        title = escape_html(&update.title),
-        detail_html = detail_html,
-        progress_class = progress_class,
-        progress = update.progress.min(100),
-        progress_meta = progress_meta,
-        progress_pct_class = progress_pct_class
+</html>"#
     );
 
-    let b64 = BASE64_STANDARD.encode(html.as_bytes());
-    format!("data:text/html;charset=utf-8;base64,{}", b64)
-}
-
-fn escape_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
+    html
 }
