@@ -20,8 +20,8 @@
       {
         "label": "splash",
         "title": "Alas Launcher",
-        "width": 640,
-        "height": 180,
+        "width": 620,
+        "height": 220,
         "resizable": false,
         "url": "about:blank",
         "acceptFirstMouse": true,

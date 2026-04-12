@@ -6,6 +6,7 @@ mod setup;
 mod window_util;
 
 use std::{
+    cell::Cell,
     fs,
     sync::{Arc, Mutex},
     thread::{self},
@@ -22,7 +23,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     backend::ManagedBackend,
-    setup::{get_deploy_config, setup_alas_repo, setup_environment},
+    setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
 };
 
 fn main() -> Result<()> {
@@ -86,23 +87,56 @@ fn main() -> Result<()> {
                     let backend = backend.clone();
                     thread::spawn(move || {
                         let splash = app_handle.get_webview_window("splash").unwrap();
-                        let status_updater = |text: &str| {
-                            let content = format!("Loading ALAS, please wait..\n\n{}", text);
-                            let url = Url::parse(&text_to_splash(&content)).unwrap();
+                        let last_progress = Cell::new(0u8);
+                        let mut status_updater = |update: SplashUpdate| {
+                            last_progress.set(update.progress);
+                            let url = Url::parse(&text_to_splash(&update)).unwrap();
                             splash.navigate(url).unwrap();
                         };
-                        status_updater("Initialize ALAS");
-                        if let Err(e) = setup_alas_repo(&status_updater) {
+                        status_updater(SplashUpdate::loading(
+                            "Starting up",
+                            "The local WebUI is initializing. The window will open automatically when ready.",
+                            4,
+                        ));
+                        if let Err(e) = setup_alas_repo(&mut status_updater) {
                             error!("{e}");
-                            let content = format!("Failed loading ALAS, reason: {}\n\nPlease run alas-launcher from terminal for detailed logs", e);
-                            let url = Url::parse(&text_to_splash(&content)).unwrap();
-                            splash.navigate(url).unwrap();
+                            status_updater(SplashUpdate::error(
+                                "Launch failed",
+                                format!(
+                                    "Unable to prepare ALAS. Please run alas-launcher from Terminal for the detailed error log.\n\n{}",
+                                    e
+                                ),
+                                last_progress.get().max(8),
+                            ));
                             return;
                         }
                         info!("Starting gui.py on http://127.0.0.1:{}/", port);
-                        status_updater("Starting GUI");
-                        let b = ManagedBackend::new(port).unwrap();
+                        status_updater(SplashUpdate::loading(
+                            "Starting up",
+                            "The local WebUI is initializing. This usually takes a few seconds. The window will open automatically when ready.",
+                            97,
+                        ));
+                        let b = match ManagedBackend::new(port) {
+                            Ok(backend) => backend,
+                            Err(e) => {
+                                error!("{e}");
+                                status_updater(SplashUpdate::error(
+                                    "Launch failed",
+                                    format!(
+                                        "Unable to start the local service. Check whether the configured port is already in use.\n\n{}",
+                                        e
+                                    ),
+                                    last_progress.get().max(97),
+                                ));
+                                return;
+                            }
+                        };
                         *backend.lock().unwrap() = Some(b);
+                        status_updater(SplashUpdate::loading(
+                            "Opening window",
+                            "The main window is ready and will appear now.",
+                            100,
+                        ));
                         splash.destroy().unwrap();
                         info!("Webview is ready");
                         let window = app_handle.get_webview_window("main").unwrap();
@@ -192,66 +226,34 @@ if (!window.alas_launcher_injected) {
     }
 }
 
-fn text_to_splash(s: &str) -> String {
-    let normalized = s.replace('\r', "");
-    let mut lines = normalized
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let banner = lines
-        .first()
-        .copied()
-        .unwrap_or("Loading ALAS, please wait..");
-    let progress = lines.iter().find_map(|line| parse_splash_progress(line));
-    let is_error = normalized.contains("Failed loading ALAS");
-
-    if !lines.is_empty() {
-        lines.remove(0);
-    }
-
-    let status = lines
-        .iter()
-        .find(|line| !is_progress_bar_line(line))
-        .copied()
-        .unwrap_or(if is_error {
-            "Startup failed"
-        } else {
-            "Preparing workspace"
-        });
-    let detail_lines = lines
-        .into_iter()
-        .filter(|line| !is_progress_bar_line(line) && *line != status)
-        .take(3)
-        .map(escape_html)
-        .collect::<Vec<_>>();
-    let detail_html = if detail_lines.is_empty() {
-        if is_error {
-            "Run alas-launcher from Terminal for the full error log.".to_owned()
-        } else {
-            "Checking the repository, Python environment, and local WebUI before opening the main window."
-                .to_owned()
-        }
+fn text_to_splash(update: &SplashUpdate) -> String {
+    let badge_class = if update.is_error {
+        "badge badge-err"
     } else {
-        detail_lines.join("<br>")
+        "badge"
     };
-    let progress_value = progress.unwrap_or(42).clamp(6, 100);
-    let progress_class = if progress.is_some() {
-        "progress-fill"
+    let badge_text = if update.is_error { "Error" } else { "Loading" };
+    let indicator = if update.is_error {
+        "<div class=\"err-dot\">!</div>"
     } else {
-        "progress-fill progress-fill-indeterminate"
+        "<div class=\"spinner\"></div>"
     };
-    let shell_class = if is_error {
-        "shell shell-error"
+    let progress_class = if update.is_error {
+        "prog-fill prog-fill-err"
     } else {
-        "shell"
+        "prog-fill"
     };
-    let badge = if is_error { "Error" } else { "Starting" };
-    let indicator = if is_error {
-        "<div class=\"indicator indicator-error\"></div>"
+    let progress_pct_class = if update.is_error {
+        "prog-pct prog-pct-err"
     } else {
-        "<div class=\"indicator indicator-spin\"></div>"
+        "prog-pct"
     };
+    let progress_meta = if update.is_error {
+        "Stopped during initialization"
+    } else {
+        "The window opens automatically when ready"
+    };
+    let detail_html = escape_html(&update.detail).replace('\n', "<br>");
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -261,259 +263,270 @@ fn text_to_splash(s: &str) -> String {
 <style>
   :root {{
     color-scheme: light;
-    --bg-a: #f7f1e7;
-    --bg-b: #e7eef8;
-    --panel: rgba(255, 255, 255, 0.78);
-    --panel-border: rgba(17, 24, 39, 0.08);
-    --text: #102033;
-    --muted: #5a6b7e;
-    --accent: #2762d8;
-    --accent-soft: rgba(39, 98, 216, 0.14);
-    --track: rgba(39, 98, 216, 0.14);
-    --shadow: 0 20px 60px rgba(24, 36, 56, 0.14);
+    --color-background-primary: rgba(255, 255, 255, 0.9);
+    --color-background-secondary: #eef3f8;
+    --color-border-tertiary: rgba(196, 206, 219, 0.92);
+    --color-text-primary: #1f2a37;
+    --color-text-secondary: #617084;
+    --border-radius-lg: 20px;
   }}
-  * {{ box-sizing: border-box; }}
+  * {{
+    box-sizing: border-box;
+  }}
   html, body {{
     height: 100%;
     margin: 0;
     overflow: hidden;
     font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-    color: var(--text);
-    background:
-      radial-gradient(circle at top left, rgba(255, 255, 255, 0.92), transparent 38%),
-      radial-gradient(circle at bottom right, rgba(39, 98, 216, 0.12), transparent 32%),
-      linear-gradient(135deg, var(--bg-a), var(--bg-b));
+    color: var(--color-text-primary);
+    background: #ffffff;
   }}
   body {{
-    position: relative;
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }}
-  body::before,
-  body::after {{
-    content: "";
-    position: absolute;
-    border-radius: 999px;
-    filter: blur(10px);
-    opacity: 0.75;
+  .wrap {{
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
   }}
-  body::before {{
-    width: 220px;
-    height: 220px;
-    top: -70px;
-    right: 40px;
-    background: rgba(39, 98, 216, 0.12);
+  .card {{
+    width: calc(100% - 44px);
+    padding: 1.2rem 1.35rem 1.1rem;
   }}
-  body::after {{
-    width: 180px;
-    height: 180px;
-    left: -60px;
-    bottom: -50px;
-    background: rgba(255, 179, 71, 0.18);
-  }}
-  .shell {{
-    position: relative;
-    width: min(540px, calc(100vw - 32px));
-    padding: 24px;
-    border-radius: 24px;
-    background: var(--panel);
-    border: 1px solid var(--panel-border);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(18px);
-  }}
-  .shell-error {{
-    --accent: #c94b4b;
-    --accent-soft: rgba(201, 75, 75, 0.14);
-    --track: rgba(201, 75, 75, 0.16);
-  }}
-  .header {{
+  .card-header {{
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 18px;
+    gap: 16px;
+    margin-bottom: 16px;
   }}
-  .brand {{
-    display: flex;
-    align-items: center;
-    gap: 12px;
+  .brand-text {{
     min-width: 0;
   }}
-  .brand-mark {{
-    width: 42px;
-    height: 42px;
-    border-radius: 14px;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(135deg, var(--accent), #78a6ff);
-    color: #fff;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.35);
-  }}
-  .brand-copy {{
-    min-width: 0;
-  }}
-  .brand-copy strong,
-  .brand-copy span {{
+  .brand-text strong {{
     display: block;
-  }}
-  .brand-copy strong {{
     font-size: 15px;
-    line-height: 1.2;
+    font-weight: 500;
+    color: var(--color-text-primary);
+    margin-bottom: 2px;
   }}
-  .brand-copy span {{
-    margin-top: 4px;
-    color: var(--muted);
+  .brand-text span {{
     font-size: 12px;
+    color: var(--color-text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }}
   .badge {{
-    padding: 7px 10px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent);
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
+    font-weight: 500;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 99px;
+    background: #e6f1fb;
+    color: #0c447c;
+    border: 0.5px solid #b5d4f4;
     flex-shrink: 0;
   }}
-  .content {{
+  .badge-err {{
+    background: #fcebeb;
+    color: #791f1f;
+    border-color: #f7c1c1;
+  }}
+  .divider {{
+    height: 0.5px;
+    background: var(--color-border-tertiary);
+    margin-bottom: 16px;
+  }}
+  .status-row {{
     display: flex;
-    gap: 16px;
     align-items: flex-start;
+    gap: 14px;
   }}
-  .indicator {{
-    width: 18px;
-    height: 18px;
-    margin-top: 7px;
+  .spinner {{
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
-    flex-shrink: 0;
-  }}
-  .indicator-spin {{
-    border: 2px solid rgba(39, 98, 216, 0.18);
-    border-top-color: var(--accent);
+    border: 2px solid #b5d4f4;
+    border-top-color: #185fa5;
     animation: spin 0.9s linear infinite;
+    flex-shrink: 0;
+    margin-top: 3px;
   }}
-  .indicator-error {{
-    background:
-      radial-gradient(circle at center, var(--accent) 0 30%, transparent 32%),
-      radial-gradient(circle at center, rgba(201, 75, 75, 0.18) 0 62%, transparent 64%);
+  .err-dot {{
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #e24b4a;
+    flex-shrink: 0;
+    margin-top: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 500;
   }}
-  .status {{
+  .status-body {{
     min-width: 0;
     width: 100%;
   }}
-  .status h1 {{
+  .status-body h2 {{
+    font-size: 21px;
+    font-weight: 500;
+    margin: 0 0 5px;
+    color: var(--color-text-primary);
+    letter-spacing: -0.02em;
+  }}
+  .status-body p {{
+    font-size: 12.5px;
+    color: var(--color-text-secondary);
     margin: 0;
-    font-size: 28px;
-    line-height: 1.1;
-    font-weight: 700;
-    letter-spacing: -0.03em;
+    line-height: 1.45;
   }}
-  .status p {{
-    margin: 10px 0 0;
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.55;
+  .prog-wrap {{
+    margin-top: 16px;
   }}
-  .progress {{
-    margin-top: 18px;
-    width: 100%;
-    height: 10px;
-    border-radius: 999px;
+  .prog-track {{
+    height: 6px;
+    border-radius: 99px;
+    background: var(--color-background-secondary);
     overflow: hidden;
-    background: var(--track);
   }}
-  .progress-fill {{
-    position: relative;
+  .prog-fill {{
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, var(--accent), #78a6ff);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.28);
+    background: #185fa5;
+    position: relative;
+    overflow: hidden;
   }}
-  .progress-fill::after {{
+  .prog-fill::after {{
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
     transform: translateX(-100%);
-    animation: sweep 1.9s ease-in-out infinite;
+    animation: sweep 2s ease-in-out infinite;
   }}
-  .progress-fill-indeterminate {{
-    min-width: 34%;
-    animation: drift 2.4s ease-in-out infinite;
+  .prog-fill-err {{
+    background: #e24b4a;
   }}
-  .footer {{
-    margin-top: 14px;
+  .prog-fill-err::after {{
+    display: none;
+  }}
+  .prog-meta {{
     display: flex;
-    align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    color: var(--muted);
-    font-size: 12px;
+    align-items: center;
+    margin-top: 7px;
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
   }}
-  .hint {{
-    opacity: 0.92;
-  }}
-  .percent {{
+  .prog-pct {{
+    font-weight: 500;
+    color: #185fa5;
     font-variant-numeric: tabular-nums;
-    color: var(--accent);
-    font-weight: 700;
+  }}
+  .prog-pct-err {{
+    color: #a32d2d;
+  }}
+  @media (max-height: 260px) {{
+    .card {{
+      width: calc(100% - 36px);
+      padding: 1rem 1.15rem 0.95rem;
+    }}
+    .card-header {{
+      margin-bottom: 14px;
+    }}
+    .divider {{
+      margin-bottom: 14px;
+    }}
+    .status-body h2 {{
+      font-size: 18px;
+    }}
+    .status-body p {{
+      font-size: 12px;
+      line-height: 1.4;
+    }}
+    .prog-wrap {{
+      margin-top: 14px;
+    }}
+    .prog-meta {{
+      margin-top: 6px;
+      font-size: 11px;
+    }}
+  }}
+  @media (max-width: 560px) {{
+    body {{
+      padding: 0 12px;
+    }}
+    .card-header {{
+      align-items: flex-start;
+    }}
+    .brand-text span {{
+      white-space: normal;
+    }}
+    .prog-meta {{
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 12px;
+    }}
   }}
   @keyframes spin {{
     to {{ transform: rotate(360deg); }}
   }}
   @keyframes sweep {{
-    to {{ transform: translateX(100%); }}
-  }}
-  @keyframes drift {{
-    0% {{ transform: translateX(-18%); }}
-    50% {{ transform: translateX(80%); }}
-    100% {{ transform: translateX(-18%); }}
+    to {{ transform: translateX(200%); }}
   }}
 </style>
 </head>
 <body>
-  <main class="{shell_class}">
-    <section class="header">
-      <div class="brand">
-        <div class="brand-mark">AL</div>
-        <div class="brand-copy">
+  <div class="wrap">
+    <div class="card">
+      <div class="card-header">
+        <div class="brand-text">
           <strong>ALAS Launcher</strong>
-          <span>{banner}</span>
+          <span>{subtitle}</span>
+        </div>
+        <div class="{badge_class}">{badge_text}</div>
+      </div>
+      <div class="divider"></div>
+      <div class="status-row">
+        {indicator}
+        <div class="status-body">
+          <h2>{title}</h2>
+          <p>{detail_html}</p>
         </div>
       </div>
-      <div class="badge">{badge}</div>
-    </section>
-    <section class="content">
-      {indicator}
-      <div class="status">
-        <h1>{status}</h1>
-        <p>{detail_html}</p>
-        <div class="progress">
-          <div class="{progress_class}" style="width: {progress_value}%;"></div>
+      <div class="prog-wrap">
+        <div class="prog-track">
+          <div class="{progress_class}" style="width: {progress}%;"></div>
         </div>
-        <div class="footer">
-          <span class="hint">The window will open automatically when the local WebUI is ready.</span>
-          <span class="percent">{progress_value}%</span>
+        <div class="prog-meta">
+          <span>{progress_meta}</span>
+          <span class="{progress_pct_class}">{progress}%</span>
         </div>
       </div>
-    </section>
-  </main>
+    </div>
+  </div>
 </body>
 </html>"#,
-        shell_class = shell_class,
-        banner = escape_html(banner),
-        badge = badge,
+        subtitle = escape_html(&update.subtitle),
+        badge_class = badge_class,
+        badge_text = badge_text,
         indicator = indicator,
-        status = escape_html(status),
+        title = escape_html(&update.title),
         detail_html = detail_html,
         progress_class = progress_class,
-        progress_value = progress_value
+        progress = update.progress.min(100),
+        progress_meta = progress_meta,
+        progress_pct_class = progress_pct_class
     );
 
     let b64 = BASE64_STANDARD.encode(html.as_bytes());
@@ -533,38 +546,4 @@ fn escape_html(s: &str) -> String {
         }
     }
     out
-}
-
-fn is_progress_bar_line(line: &str) -> bool {
-    line.starts_with('[') && line.ends_with(']') && line.contains('=')
-}
-
-fn parse_splash_progress(line: &str) -> Option<u8> {
-    if let Some(value) = parse_percentage(line) {
-        return Some(value);
-    }
-
-    if !is_progress_bar_line(line) {
-        return None;
-    }
-
-    let inner = &line[1..line.len() - 1];
-    let total = inner.chars().filter(|ch| *ch == '=' || *ch == ' ').count();
-    if total == 0 {
-        return None;
-    }
-    let filled = inner.chars().filter(|ch| *ch == '=').count();
-    Some(((filled as f32 / total as f32) * 100.0).round() as u8)
-}
-
-fn parse_percentage(line: &str) -> Option<u8> {
-    line.split('%')
-        .next()
-        .and_then(|before| {
-            before
-                .rsplit(|ch: char| !ch.is_ascii_digit() && ch != '.')
-                .next()
-        })
-        .and_then(|value| value.parse::<f32>().ok())
-        .map(|value| value.round().clamp(0.0, 100.0) as u8)
 }

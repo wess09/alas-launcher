@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::env::set_current_dir;
 use std::fs;
 use std::io::{BufReader, Read};
@@ -10,6 +11,56 @@ use std::thread;
 use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
+
+#[derive(Clone, Debug)]
+pub struct SplashUpdate {
+    pub subtitle: String,
+    pub title: String,
+    pub detail: String,
+    pub progress: u8,
+    pub is_error: bool,
+}
+
+impl SplashUpdate {
+    pub fn loading(
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        progress: u8,
+    ) -> Self {
+        Self {
+            subtitle: "Connecting to local service...".to_owned(),
+            title: title.into(),
+            detail: detail.into(),
+            progress: progress.min(100),
+            is_error: false,
+        }
+    }
+
+    pub fn error(
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        progress: u8,
+    ) -> Self {
+        Self {
+            subtitle: "Failed to connect".to_owned(),
+            title: title.into(),
+            detail: detail.into(),
+            progress: progress.min(100),
+            is_error: true,
+        }
+    }
+
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = subtitle.into();
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScriptPhase {
+    Git,
+    Dependencies { total_packages: usize },
+}
 
 fn alas_repo_dir() -> PathBuf {
     // Always check if this is a typical same-folder portable distribution
@@ -88,17 +139,47 @@ fn setup_git_ca_bundle() {
     }
 }
 
-pub fn setup_alas_repo(mut status_updater: impl FnMut(&str)) -> Result<()> {
+pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
     info!("Starting setup for ALAS repository...");
     #[cfg(target_os = "linux")]
     setup_git_ca_bundle();
     // Similar setup to deploy/installer.py
-    status_updater("Cleaning up config files");
+    status_updater(
+        SplashUpdate::loading(
+            "Preparing workspace",
+            "Cleaning cached config state and checking the local ALAS setup.",
+            8,
+        )
+        .with_subtitle("Checking local environment..."),
+    );
     atomic_failure_cleanup("./config")?;
     ensure_python_dependency_config()?;
-    status_updater("Updating ALAS");
+    status_updater(
+        SplashUpdate::loading(
+            "Updating ALAS",
+            "Fetching repository changes and validating the local working copy.",
+            18,
+        )
+        .with_subtitle("Syncing repository..."),
+    );
     git_update(&mut status_updater)?;
+    status_updater(
+        SplashUpdate::loading(
+            "Installing dependencies",
+            "Verifying the Python packages required by ALAS.",
+            64,
+        )
+        .with_subtitle("Syncing Python packages..."),
+    );
     pip_install(&mut status_updater)?;
+    status_updater(
+        SplashUpdate::loading(
+            "Finalizing startup",
+            "The local WebUI is almost ready. Opening the main window next.",
+            94,
+        )
+        .with_subtitle("Connecting to local service..."),
+    );
     Ok(())
 }
 
@@ -149,7 +230,11 @@ fn pipe_lines(read: impl Read + Send + 'static, tx: Sender<(bool, String)>, is_e
     });
 }
 
-fn run_python_script(script: &str, mut status_updater: impl FnMut(&str), prefix: &str) -> Result<()> {
+fn run_python_script(
+    script: &str,
+    mut status_updater: impl FnMut(SplashUpdate),
+    phase: ScriptPhase,
+) -> Result<()> {
     // Spawn the child with piped stdout/stderr so we can tee them.
     let mut child = Command::new("python")
         .args(["-c", script])
@@ -175,27 +260,12 @@ fn run_python_script(script: &str, mut status_updater: impl FnMut(&str), prefix:
     drop(tx);
 
     let mut last_err = "".to_owned();
+    let mut seen_packages = HashSet::new();
 
     // Receive lines and tee them to stdout/stderr and the status_updater callback.
     while let Ok((is_err, line)) = rx.recv() {
-        if line.contains("=====") {
-            let sanitized = line.replace("=", " ").trim().to_owned();
-            status_updater(&format!("{prefix}: {sanitized}"));
-        } else if line.contains("objects:") || line.contains("deltas:") || line.contains("files:") {
-            let sanitized = line.trim().to_owned();
-            let mut n = 0usize;
-            if let Some(precentage) = find_percentage(&sanitized) {
-                n = (precentage / 2) as usize;
-            }
-            let bar = "=".repeat(n) + &" ".repeat(50 - n);
-            status_updater(&format!("{prefix}: {sanitized}\n[{bar}]"));
-        } else if line.contains("Package") && line.contains("Version") {
-            // pip progress or list
-        } else if line.starts_with("Collecting") {
-            let sanitized = line.trim().to_owned();
-            status_updater(&format!("{prefix}: {sanitized}"));
-        } else if line.starts_with("Installing collected packages") {
-            status_updater(&format!("{prefix}: Installing packages..."));
+        if let Some(update) = splash_update_for_output(&line, phase, &mut seen_packages) {
+            status_updater(update);
         }
 
         if is_err {
@@ -210,14 +280,17 @@ fn run_python_script(script: &str, mut status_updater: impl FnMut(&str), prefix:
     let status = child.wait()?;
     if !status.success() {
         if last_err.is_empty() {
-            last_err = format!("Failed to run {prefix}");
+            last_err = match phase {
+                ScriptPhase::Git => "Failed to update ALAS".to_owned(),
+                ScriptPhase::Dependencies { .. } => "Failed to update dependencies".to_owned(),
+            };
         }
         return Err(anyhow!(last_err));
     }
     Ok(())
 }
 
-fn git_update(status_updater: impl FnMut(&str)) -> Result<()> {
+fn git_update(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
     // Decorate execute() to get fetch progress
     let script = r#"
 import deploy.git
@@ -231,16 +304,22 @@ gm = deploy.git.GitManager()
 gm.execute = decorate_execute(gm.execute)
 gm.git_install()
 "#;
-    run_python_script(script, status_updater, "Updating ALAS")
+    run_python_script(script, status_updater, ScriptPhase::Git)
 }
 
-fn pip_install(status_updater: impl FnMut(&str)) -> Result<()> {
+fn pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
     let script = r#"
 import deploy.pip
 pm = deploy.pip.PipManager()
 pm.pip_install()
 "#;
-    run_python_script(script, status_updater, "Updating Dependencies")
+    run_python_script(
+        script,
+        status_updater,
+        ScriptPhase::Dependencies {
+            total_packages: count_required_packages("./requirements.txt"),
+        },
+    )
 }
 
 fn ensure_python_dependency_config() -> Result<()> {
@@ -306,6 +385,134 @@ fn atomic_failure_cleanup(path: &str) -> Result<()> {
         .create_no_window()
         .status()?;
     Ok(())
+}
+
+fn splash_update_for_output(
+    line: &str,
+    phase: ScriptPhase,
+    seen_packages: &mut HashSet<String>,
+) -> Option<SplashUpdate> {
+    let sanitized = line.trim();
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    match phase {
+        ScriptPhase::Git => splash_update_for_git_output(sanitized),
+        ScriptPhase::Dependencies { total_packages } => {
+            splash_update_for_dependency_output(sanitized, total_packages, seen_packages)
+        }
+    }
+}
+
+fn splash_update_for_git_output(line: &str) -> Option<SplashUpdate> {
+    if line.contains("=====") {
+        let detail = line.replace('=', " ");
+        return Some(
+            SplashUpdate::loading(
+                "Updating ALAS",
+                detail.trim(),
+                24,
+            )
+            .with_subtitle("Syncing repository..."),
+        );
+    }
+
+    if line.contains("objects:") || line.contains("deltas:") || line.contains("files:") {
+        let percentage = find_percentage(line).unwrap_or(0);
+        let progress = 18 + ((percentage as u16 * 42) / 100) as u8;
+        return Some(
+            SplashUpdate::loading("Updating ALAS", line, progress)
+                .with_subtitle("Syncing repository..."),
+        );
+    }
+
+    None
+}
+
+fn splash_update_for_dependency_output(
+    line: &str,
+    total_packages: usize,
+    seen_packages: &mut HashSet<String>,
+) -> Option<SplashUpdate> {
+    if line.contains("=====") {
+        let detail = line.replace('=', " ");
+        let lowered = detail.to_ascii_lowercase();
+        let (title, progress) = if lowered.contains("check python") {
+            ("Checking Python runtime", 66)
+        } else if lowered.contains("update dependencies") {
+            ("Installing dependencies", 72)
+        } else {
+            ("Installing dependencies", 70)
+        };
+        return Some(
+            SplashUpdate::loading(title, detail.trim(), progress)
+                .with_subtitle("Syncing Python packages..."),
+        );
+    }
+
+    if let Some(package_name) = extract_dependency_name(line) {
+        seen_packages.insert(package_name);
+        let progress = dependency_progress(seen_packages.len(), total_packages);
+        return Some(
+            SplashUpdate::loading("Installing dependencies", line, progress)
+                .with_subtitle("Syncing Python packages..."),
+        );
+    }
+
+    if line.starts_with("Installing collected packages") {
+        return Some(
+            SplashUpdate::loading(
+                "Installing dependencies",
+                "Applying downloaded package updates to the local Python toolkit.",
+                92,
+            )
+            .with_subtitle("Syncing Python packages..."),
+        );
+    }
+
+    None
+}
+
+fn dependency_progress(processed_packages: usize, total_packages: usize) -> u8 {
+    if total_packages == 0 {
+        return 78;
+    }
+
+    let clamped = processed_packages.min(total_packages) as u16;
+    let total = total_packages as u16;
+    let span = 24u16;
+    (64 + ((clamped * span) / total) as u8).min(90)
+}
+
+fn extract_dependency_name(line: &str) -> Option<String> {
+    let prefixes = ["Collecting ", "Requirement already satisfied: "];
+    let prefix = prefixes.iter().find(|prefix| line.starts_with(**prefix))?;
+    let rest = line.strip_prefix(prefix)?;
+    let end = rest
+        .find("==")
+        .or_else(|| rest.find(" ("))
+        .or_else(|| rest.find(" in "))
+        .unwrap_or(rest.len());
+    let package = rest[..end].trim();
+    if package.is_empty() {
+        None
+    } else {
+        Some(package.to_ascii_lowercase())
+    }
+}
+
+fn count_required_packages(path: &str) -> usize {
+    fs::read_to_string(path)
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#') && line.contains("=="))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn find_percentage(s: &str) -> Option<u8> {
