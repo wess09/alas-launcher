@@ -48,11 +48,18 @@ fn prepend_path_to_env(key: &str, path: PathBuf) {
     std::env::set_var(key, std::env::join_paths(paths).unwrap());
 }
 
+fn configure_python_package_installation() {
+    // Some portable Python builds are marked as externally managed (PEP 668),
+    // which blocks `pip install` unless this opt-out is present.
+    std::env::set_var("PIP_BREAK_SYSTEM_PACKAGES", "1");
+}
+
 #[cfg(unix)]
 pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
     info!("ALAS dir is {:?}", &dir);
     set_current_dir(&dir)?;
+    configure_python_package_installation();
     prepend_path_to_env("PATH", dir.join("toolkit").join("libexec").join("git-core"));
     prepend_path_to_env("PATH", dir.join("toolkit").join("bin"));
     prepend_path_to_env("LD_LIBRARY_PATH", dir.join("toolkit").join("lib"));
@@ -64,6 +71,7 @@ pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
     info!("ALAS dir is {:?}", &dir);
     set_current_dir(&dir)?;
+    configure_python_package_installation();
     prepend_path_to_env("PATH", dir.join("toolkit").join("git").join("cmd"));
     prepend_path_to_env("PATH", dir.join("toolkit").join("Scripts"));
     prepend_path_to_env("PATH", dir.join("toolkit"));
