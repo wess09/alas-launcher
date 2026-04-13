@@ -90,14 +90,11 @@ fn main() -> Result<()> {
             .build()?;
             main_window.set_resizable(true)?;
 
-            // Windows/Linux: remove native decorations
+            // Windows/Linux: remove native decorations for main window only
+            // Splash window keeps native decorations (title bar)
             #[cfg(not(target_os = "macos"))]
             {
                 main_window.set_decorations(false)?;
-                if let Some(splash) = app.get_webview_window("splash") {
-                    splash.set_decorations(false)?;
-                    splash.set_resizable(true)?;
-                }
             }
 
             // Windows: create system tray
@@ -332,7 +329,12 @@ if (!window.alas_launcher_injected) {
             reader.onload = async () => {
                 const data = reader.result.split(',')[1];
                 console.log(data);
-                window.__TAURI__.core.invoke('save_as', { filename, data });
+                const tauriInvoke =
+                    (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+                    || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+                if (typeof tauriInvoke === 'function') {
+                    tauriInvoke('save_as', { filename, data });
+                }
             };
             reader.readAsDataURL(blob);
         };
@@ -367,120 +369,10 @@ fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
 }
 
 fn splash_shell_html() -> String {
-    let splash_titlebar = if cfg!(target_os = "macos") {
-        String::new()
-    } else {
-        r#"
-  <div id="alas-splash-titlebar" class="splash-titlebar">
-    <div class="splash-titlebar-drag">
-      <div class="splash-titlebar-brand">
-      <span class="splash-titlebar-dot"></span>
-      <span>ALAS Launcher</span>
-      </div>
-    </div>
-    <div class="splash-titlebar-actions" style="display: flex;">
-      <button type="button" id="alas-splash-maximize" class="splash-titlebar-button splash-titlebar-button-maximize" aria-label="Maximize window" title="Maximize" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
-        <svg viewBox="0 0 8 8" class="splash-svg-restore" style="display:none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;" aria-hidden="true">
-          <polyline points="1,4 1,1 4,1"></polyline><polyline points="4,7 7,7 7,4"></polyline>
-        </svg>
-        <svg viewBox="0 0 8 8" class="splash-svg-maximize" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;" aria-hidden="true">
-          <polyline points="1,3.5 1,1 3.5,1"></polyline><polyline points="4.5,7 7,7 7,4.5"></polyline>
-        </svg>
-      </button>
-      <button type="button" id="alas-splash-minimize" class="splash-titlebar-button splash-titlebar-button-minimize" aria-label="Minimize window" title="Minimize" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
-        <svg viewBox="0 0 8 8" aria-hidden="true" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;">
-          <line x1="1" y1="4" x2="7" y2="4"></line>
-        </svg>
-      </button>
-      <button type="button" id="alas-splash-close" class="splash-titlebar-button splash-titlebar-button-close" aria-label="Close window" title="Close" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
-        <svg viewBox="0 0 8 8" aria-hidden="true" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;">
-          <line x1="1.5" y1="1.5" x2="6.5" y2="6.5"></line>
-          <line x1="6.5" y1="1.5" x2="1.5" y2="6.5"></line>
-        </svg>
-      </button>
-    </div>
-  </div>
-"#
-        .to_string()
-    };
-    let splash_script = if cfg!(target_os = "macos") {
-        String::new()
-    } else {
-        r#"
-    (function () {
-      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
-      if (!invoke) {
-        return;
-      }
-
-      const titlebar = document.getElementById('alas-splash-titlebar');
-      const dragZone = document.querySelector('.splash-titlebar-drag');
-      const maximizeButton = document.getElementById('alas-splash-maximize');
-      const minimizeButton = document.getElementById('alas-splash-minimize');
-      const closeButton = document.getElementById('alas-splash-close');
-
-      const syncMaximizeState = async () => {
-        if (!maximizeButton) {
-          return;
-        }
-        try {
-          const maximized = await invoke('window_is_maximized');
-          maximizeButton.title = maximized ? 'Restore' : 'Maximize';
-          maximizeButton.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
-          const maximizeSvg = maximizeButton.querySelector('.splash-svg-maximize');
-          const restoreSvg = maximizeButton.querySelector('.splash-svg-restore');
-          if (maximizeSvg) maximizeSvg.style.display = maximized ? 'none' : '';
-          if (restoreSvg) restoreSvg.style.display = maximized ? '' : 'none';
-        } catch (error) {
-          console.error('Failed to sync splash maximize state', error);
-        }
-      };
-
-      if (dragZone) {
-        dragZone.addEventListener('mousedown', event => {
-          if (event.button !== 0 || event.target.closest('button')) {
-            return;
-          }
-          invoke('window_start_dragging').catch(error => console.error('Failed to start dragging splash window', error));
-        });
-        dragZone.addEventListener('dblclick', event => {
-          if (event.target.closest('button')) {
-            return;
-          }
-          invoke('window_toggle_maximize')
-            .then(() => syncMaximizeState())
-            .catch(error => console.error('Failed to toggle splash maximize from drag zone', error));
-        });
-      }
-
-      if (maximizeButton) {
-        maximizeButton.addEventListener('click', event => {
-          event.stopPropagation();
-          invoke('window_toggle_maximize')
-            .then(() => syncMaximizeState())
-            .catch(error => console.error('Failed to toggle splash maximize', error));
-        });
-      }
-
-      if (minimizeButton) {
-        minimizeButton.addEventListener('click', event => {
-          event.stopPropagation();
-          invoke('window_minimize').catch(error => console.error('Failed to minimize splash window', error));
-        });
-      }
-
-      if (closeButton) {
-        closeButton.addEventListener('click', event => {
-          event.stopPropagation();
-          invoke('window_close').catch(error => console.error('Failed to close splash window', error));
-        });
-      }
-
-      void syncMaximizeState();
-    })();
-"#
-        .to_string()
-    };
+    // Splash window uses native decorations, no custom titlebar needed
+    let splash_titlebar = String::new();
+    // No custom titlebar script needed for splash (uses native decorations)
+    let splash_script = String::new();
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -515,99 +407,15 @@ fn splash_shell_html() -> String {
     padding: 0;
     position: relative;
   }}
-  .splash-titlebar {{
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 42px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 10px 0 14px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 253, 0.88));
-    border-bottom: 1px solid rgba(196, 206, 219, 0.82);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-  }}
-  .splash-titlebar-drag {{
-    flex: 1 1 auto;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }}
-  .splash-titlebar-brand {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 12.5px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    color: #213142;
-    min-width: 0;
-  }}
-  .splash-titlebar-dot {{
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #185fa5, #4aa3ff);
-    box-shadow: 0 0 0 4px rgba(24, 95, 165, 0.12);
-    flex-shrink: 0;
-  }}
-  .splash-titlebar-actions {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 12px;
-    flex-shrink: 0;
-  }}
-  .splash-titlebar-button {{
-    width: 12px;
-    height: 12px;
-    border: none;
-    border-radius: 50%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    position: relative;
-    transition: filter 120ms ease;
-    flex: 0 0 auto;
-    padding: 0;
-  }}
-  .splash-titlebar-button:active {{
-    filter: brightness(0.85);
-  }}
-  .splash-titlebar-button-close {{
-    background: #ff5f57;
-    box-shadow: 0 0 0 0.5px #e0443e;
-  }}
-  .splash-titlebar-button-minimize {{
-    background: #febc2e;
-    box-shadow: 0 0 0 0.5px #d4a017;
-  }}
-  .splash-titlebar-button-maximize {{
-    background: #28c840;
-    box-shadow: 0 0 0 0.5px #14ae35;
-  }}
-  .splash-titlebar-button svg {{
-    width: 7px;
-    height: 7px;
-    stroke: rgba(0, 0, 0, 0.72);
-    fill: none;
-    stroke-width: 1.35;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    opacity: 1;
-  }}
+
+
   .wrap {{
     width: 100%;
     height: 100%;
     display: flex;
     justify-content: center;
     align-items: center;
-    padding-top: 42px;
+    padding-top: 0;
   }}
   .card {{
     width: calc(100% - 44px);
@@ -908,8 +716,10 @@ fn main_window_titlebar_injection_script() -> &'static str {
     #[cfg(not(target_os = "macos"))]
     {
         r#"
-        const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
-        if (!invoke) {
+        const invoke =
+            (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+            || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+        if (typeof invoke !== 'function') {
             return;
         }
 
@@ -922,6 +732,7 @@ fn main_window_titlebar_injection_script() -> &'static str {
             if (!document.getElementById('alas-launcher-titlebar-style')) {
                 const style = document.createElement('style');
                 style.id = 'alas-launcher-titlebar-style';
+                // 【完全参考加载页面的 CSS】将主页面的图标设为透明过渡，只有容器 .header-icon:hover 才展示 SVG 内部线条
                 style.textContent = `
                     :root {
                         --alas-titlebar-height: 44px;
@@ -987,13 +798,18 @@ fn main_window_titlebar_injection_script() -> &'static str {
                         box-shadow: 0 0 0 0.5px #14ae35;
                     }
                     .icon svg {
-                        width: 8px;
-                        height: 8px;
-                        stroke: rgba(0,0,0,0.86);
+                        width: 7px;
+                        height: 7px;
+                        stroke: rgba(0,0,0,0.72);
                         fill: none;
-                        stroke-width: 1.45;
+                        stroke-width: 1.35;
                         stroke-linecap: round;
                         stroke-linejoin: round;
+                        opacity: 0;
+                        transition: opacity 150ms ease;
+                    }
+                    .header-icon:hover .icon svg {
+                        opacity: 1;
                     }
                     @media (max-width: 680px) {
                         .alas-titlebar-drag-zone {
@@ -1009,7 +825,7 @@ fn main_window_titlebar_injection_script() -> &'static str {
             titlebar.innerHTML = `
                 <div class="alas-titlebar-drag-zone" aria-hidden="true"></div>
                 <div class="header-icon">
-                    <button type="button" class="icon icon-maximize" data-action="maximize" aria-label="Maximize/Restore window" title="Maximize">
+                    <button type="button" class="icon icon-maximize" data-action="maximize" aria-label="最大化/还原窗口" title="最大化">
                         <svg viewBox="0 0 6 6" class="svg-restore" style="display:none">
                             <polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/>
                         </svg>
@@ -1017,10 +833,10 @@ fn main_window_titlebar_injection_script() -> &'static str {
                             <polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/>
                         </svg>
                     </button>
-                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="Minimize window" title="Minimize">
+                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="最小化窗口" title="最小化">
                         <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
                     </button>
-                    <button type="button" class="icon icon-close" data-action="close" aria-label="Close window" title="Close">
+                    <button type="button" class="icon icon-close" data-action="close" aria-label="关闭窗口" title="关闭">
                         <svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg>
                     </button>
                 </div>
@@ -1037,8 +853,8 @@ fn main_window_titlebar_injection_script() -> &'static str {
                 try {
                     const maximized = await invoke('window_is_maximized');
                     maximizeButton.dataset.maximized = maximized ? 'true' : 'false';
-                    maximizeButton.title = maximized ? 'Restore' : 'Maximize';
-                    maximizeButton.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+                    maximizeButton.title = maximized ? '还原' : '最大化';
+                    maximizeButton.setAttribute('aria-label', maximized ? '还原窗口' : '最大化窗口');
                     maximizeButton.querySelector('.svg-maximize').style.display = maximized ? 'none' : '';
                     maximizeButton.querySelector('.svg-restore').style.display = maximized ? '' : 'none';
                 } catch (e) {
