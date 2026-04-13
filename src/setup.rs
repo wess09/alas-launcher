@@ -23,11 +23,7 @@ pub struct SplashUpdate {
 }
 
 impl SplashUpdate {
-    pub fn loading(
-        title: impl Into<String>,
-        detail: impl Into<String>,
-        progress: u8,
-    ) -> Self {
+    pub fn loading(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
             subtitle: "Connecting to local service...".to_owned(),
             title: title.into(),
@@ -37,11 +33,7 @@ impl SplashUpdate {
         }
     }
 
-    pub fn error(
-        title: impl Into<String>,
-        detail: impl Into<String>,
-        progress: u8,
-    ) -> Self {
+    pub fn error(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
             subtitle: "Failed to connect".to_owned(),
             title: title.into(),
@@ -398,12 +390,8 @@ fn splash_update_for_git_output(line: &str) -> Option<SplashUpdate> {
     if line.contains("=====") {
         let detail = line.replace('=', " ");
         return Some(
-            SplashUpdate::loading(
-                "Updating ALAS",
-                detail.trim(),
-                24,
-            )
-            .with_subtitle("Syncing repository..."),
+            SplashUpdate::loading("Updating ALAS", detail.trim(), 24)
+                .with_subtitle("Syncing repository..."),
         );
     }
 

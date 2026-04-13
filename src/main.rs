@@ -8,7 +8,10 @@ mod window_util;
 use std::{
     cell::Cell,
     fs,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread::{self},
 };
 
@@ -16,6 +19,9 @@ use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use serde_json::to_string;
 use tauri::{
+    image::Image,
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
     webview::{PageLoadEvent, PageLoadPayload},
     Manager, Url, WebviewWindow,
 };
@@ -50,17 +56,27 @@ fn main() -> Result<()> {
     let port = port.unwrap_or(22267) as u16;
 
     let backend = Arc::new(Mutex::new(None));
+    let allow_exit = Arc::new(AtomicBool::new(false));
+
+    let allow_exit_for_setup = allow_exit.clone();
 
     info!("Starting Webview...");
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![save_as])
+        .invoke_handler(tauri::generate_handler![
+            save_as,
+            window_minimize,
+            window_toggle_maximize,
+            window_close,
+            window_start_dragging,
+            window_is_maximized
+        ])
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = app
-                .get_webview_window("main")
-                .and_then(|w| w.set_focus().ok());
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = reveal_window(&window);
+            }
         }))
-        .setup(|app| {
+        .setup(move |app| {
             let main_window = tauri::WebviewWindowBuilder::from_config(
                 app,
                 app.config()
@@ -73,15 +89,73 @@ fn main() -> Result<()> {
             .on_page_load(page_load_injector)
             .build()?;
             main_window.set_resizable(true)?;
+
+            // Windows/Linux: remove native decorations
+            #[cfg(not(target_os = "macos"))]
+            {
+                main_window.set_decorations(false)?;
+                if let Some(splash) = app.get_webview_window("splash") {
+                    splash.set_decorations(false)?;
+                }
+            }
+
+            // Windows: create system tray
+            #[cfg(windows)]
+            {
+                let allow_exit = allow_exit_for_setup.clone();
+                let show_item = MenuItemBuilder::new("Show / Hide")
+                    .id("toggle_visibility")
+                    .build(app)?;
+                let quit_item = MenuItemBuilder::new("Quit")
+                    .id("quit")
+                    .build(app)?;
+                let tray_menu = MenuBuilder::new(app)
+                    .item(&show_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()?;
+                TrayIconBuilder::with_id("main-tray")
+                    .icon(Image::from_path("icons/icon.png").unwrap_or_else(|_| {
+                        app.default_window_icon().unwrap().clone()
+                    }))
+                    .tooltip("Alas Launcher")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "toggle_visibility" => {
+                            toggle_main_window_visibility(app);
+                        }
+                        "quit" => {
+                            allow_exit.store(true, Ordering::SeqCst);
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            toggle_main_window_visibility(&app);
+                        }
+                    })
+                    .build(app)?;
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())?
         .run(move |app_handle, event| {
             match event {
                 tauri::RunEvent::Ready => {
+                    let allow_exit = allow_exit.clone();
                     let handle1 = app_handle.clone();
                     ctrlc::set_handler(move || {
                         info!("Received Ctrl-C, shutting down...");
+                        allow_exit.store(true, Ordering::SeqCst);
                         handle1.exit(0);
                     }).expect("Error setting Ctrl-C handler");
                     let app_handle = app_handle.clone();
@@ -145,7 +219,7 @@ fn main() -> Result<()> {
                         window
                             .navigate(Url::parse(&format!("http://127.0.0.1:{}/", port)).unwrap())
                             .unwrap();
-                        window.show().unwrap();
+                        reveal_window(&window).unwrap();
                     });
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
@@ -156,8 +230,20 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. } => {
-                    info!("Window {} closed", label);
+                tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
+                    info!("Window {} close requested", label);
+                    // Windows: hide main window to tray instead of quitting
+                    #[cfg(windows)]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            return;
+                        }
+                    }
+                    // Non-main windows or non-Windows: exit
                     app_handle.exit(0);
                 }
                 _ => {}
@@ -193,6 +279,37 @@ fn save_as(app_handle: tauri::AppHandle, filename: &str, data: &str) {
     }
 }
 
+#[tauri::command]
+fn window_minimize(window: WebviewWindow) -> tauri::Result<()> {
+    window.minimize()
+}
+
+#[tauri::command]
+fn window_toggle_maximize(window: WebviewWindow) -> tauri::Result<bool> {
+    if window.is_maximized()? {
+        window.unmaximize()?;
+        Ok(false)
+    } else {
+        window.maximize()?;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+fn window_close(window: WebviewWindow) -> tauri::Result<()> {
+    window.close()
+}
+
+#[tauri::command]
+fn window_start_dragging(window: WebviewWindow) -> tauri::Result<()> {
+    window.start_dragging()
+}
+
+#[tauri::command]
+fn window_is_maximized(window: WebviewWindow) -> tauri::Result<bool> {
+    window.is_maximized()
+}
+
 fn page_load_injector(webview: WebviewWindow, payload: PageLoadPayload<'_>) {
     if payload.event() == PageLoadEvent::Finished {
         info!(
@@ -218,10 +335,15 @@ if (!window.alas_launcher_injected) {
             };
             reader.readAsDataURL(blob);
         };
+__ALAS_TITLEBAR_SCRIPT__
     })();
 }
-"#;
-        if let Err(e) = webview.eval(injected_js) {
+"#
+        .replace(
+            "__ALAS_TITLEBAR_SCRIPT__",
+            main_window_titlebar_injection_script(),
+        );
+        if let Err(e) = webview.eval(&injected_js) {
             error!("Failed to inject JS to webview: {:?}", e);
         }
     }
@@ -244,6 +366,67 @@ fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
 }
 
 fn splash_shell_html() -> String {
+    let splash_titlebar = if cfg!(target_os = "macos") {
+        String::new()
+    } else {
+        r#"
+  <div id="alas-splash-titlebar" class="splash-titlebar" data-tauri-drag-region>
+    <div class="splash-titlebar-brand" data-tauri-drag-region>
+      <span class="splash-titlebar-dot"></span>
+      <span>ALAS Launcher</span>
+    </div>
+    <div class="splash-titlebar-actions">
+      <button type="button" id="alas-splash-minimize" class="splash-titlebar-button" aria-label="Minimize window" title="Minimize">
+        <span class="splash-icon splash-icon-minimize" aria-hidden="true"></span>
+      </button>
+      <button type="button" id="alas-splash-close" class="splash-titlebar-button splash-titlebar-button-close" aria-label="Close window" title="Close">
+        <span class="splash-icon splash-icon-close" aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+"#
+        .to_string()
+    };
+    let splash_script = if cfg!(target_os = "macos") {
+        String::new()
+    } else {
+        r#"
+    (function () {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (!invoke) {
+        return;
+      }
+
+      const titlebar = document.getElementById('alas-splash-titlebar');
+      const minimizeButton = document.getElementById('alas-splash-minimize');
+      const closeButton = document.getElementById('alas-splash-close');
+
+      if (titlebar) {
+        titlebar.addEventListener('mousedown', event => {
+          if (event.button !== 0 || event.target.closest('button')) {
+            return;
+          }
+          invoke('window_start_dragging').catch(error => console.error('Failed to start dragging splash window', error));
+        });
+      }
+
+      if (minimizeButton) {
+        minimizeButton.addEventListener('click', event => {
+          event.stopPropagation();
+          invoke('window_minimize').catch(error => console.error('Failed to minimize splash window', error));
+        });
+      }
+
+      if (closeButton) {
+        closeButton.addEventListener('click', event => {
+          event.stopPropagation();
+          invoke('window_close').catch(error => console.error('Failed to close splash window', error));
+        });
+      }
+    })();
+"#
+        .to_string()
+    };
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -276,6 +459,102 @@ fn splash_shell_html() -> String {
     align-items: center;
     justify-content: center;
     padding: 0;
+    position: relative;
+  }}
+  .splash-titlebar {{
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px 0 14px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 253, 0.88));
+    border-bottom: 1px solid rgba(196, 206, 219, 0.82);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }}
+  .splash-titlebar-brand {{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: #213142;
+    min-width: 0;
+  }}
+  .splash-titlebar-dot {{
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #185fa5, #4aa3ff);
+    box-shadow: 0 0 0 4px rgba(24, 95, 165, 0.12);
+    flex-shrink: 0;
+  }}
+  .splash-titlebar-actions {{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }}
+  .splash-titlebar-button {{
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(234, 241, 248, 0.92);
+    color: #233446;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 120ms ease, transform 120ms ease, color 120ms ease;
+  }}
+  .splash-titlebar-button:hover {{
+    background: rgba(220, 230, 240, 0.98);
+  }}
+  .splash-titlebar-button:active {{
+    transform: scale(0.96);
+  }}
+  .splash-titlebar-button-close:hover {{
+    background: #de4d49;
+    color: #fff;
+  }}
+  .splash-icon {{
+    position: relative;
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+  }}
+  .splash-icon-minimize::before {{
+    content: "";
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    bottom: 2px;
+    height: 1.5px;
+    background: currentColor;
+    border-radius: 999px;
+  }}
+  .splash-icon-close::before,
+  .splash-icon-close::after {{
+    content: "";
+    position: absolute;
+    top: 0.5px;
+    left: 5.25px;
+    width: 1.5px;
+    height: 11px;
+    background: currentColor;
+    border-radius: 999px;
+  }}
+  .splash-icon-close::before {{
+    transform: rotate(45deg);
+  }}
+  .splash-icon-close::after {{
+    transform: rotate(-45deg);
   }}
   .wrap {{
     width: 100%;
@@ -283,6 +562,7 @@ fn splash_shell_html() -> String {
     display: flex;
     justify-content: center;
     align-items: center;
+    padding-top: 42px;
   }}
   .card {{
     width: calc(100% - 44px);
@@ -478,6 +758,7 @@ fn splash_shell_html() -> String {
 </style>
 </head>
 <body>
+  {splash_titlebar}
   <div class="wrap">
     <div class="card">
       <div class="card-header">
@@ -508,6 +789,7 @@ fn splash_shell_html() -> String {
     </div>
   </div>
   <script>
+    {splash_script}
     window.__ALAS_SPLASH_UPDATE = function (payload) {{
       const badge = document.getElementById('badge');
       const spinner = document.getElementById('spinner');
@@ -544,8 +826,242 @@ fn splash_shell_html() -> String {
     }};
   </script>
 </body>
-</html>"#
+</html>"#,
+        splash_script = splash_script,
+        splash_titlebar = splash_titlebar,
     );
 
     html
+}
+
+fn reveal_window(window: &WebviewWindow) -> tauri::Result<()> {
+    if window.is_minimized()? {
+        window.unminimize()?;
+    }
+    window.show()?;
+    window.set_focus()?;
+    Ok(())
+}
+
+fn toggle_main_window_visibility(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let is_visible = window.is_visible().unwrap_or(false);
+        let is_minimized = window.is_minimized().unwrap_or(false);
+        if is_visible && !is_minimized {
+            let _ = window.hide();
+        } else {
+            let _ = reveal_window(&window);
+        }
+    }
+}
+
+fn main_window_titlebar_injection_script() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        ""
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        r#"
+        const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+        if (!invoke) {
+            return;
+        }
+
+        const titlebarHeight = 44;
+        const ensureTitlebar = () => {
+            if (!document.body || document.getElementById('alas-launcher-titlebar')) {
+                return;
+            }
+
+            if (!document.getElementById('alas-launcher-titlebar-style')) {
+                const style = document.createElement('style');
+                style.id = 'alas-launcher-titlebar-style';
+                style.textContent = `
+                    :root {
+                        --alas-titlebar-height: 44px;
+                    }
+                    #alas-launcher-titlebar {
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        height: var(--alas-titlebar-height);
+                        z-index: 2147483647;
+                        user-select: none;
+                        pointer-events: none;
+                        background: transparent;
+                    }
+                    #alas-launcher-titlebar * {
+                        box-sizing: border-box;
+                    }
+                    .alas-titlebar-drag-zone {
+                        position: absolute;
+                        inset: 0 88px 0 0;
+                        height: 100%;
+                        pointer-events: auto;
+                        background: transparent;
+                    }
+                    .header-icon {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        padding: 0 12px;
+                        position: absolute;
+                        top: 0;
+                        right: 0;
+                        height: 100%;
+                        pointer-events: auto;
+                    }
+                    .icon {
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 50%;
+                        border: none;
+                        cursor: pointer;
+                        flex: 0 0 auto;
+                        position: relative;
+                        transition: filter 120ms ease;
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .icon:active {
+                        filter: brightness(0.85);
+                    }
+                    .icon-close {
+                        background: #ff5f57;
+                        box-shadow: 0 0 0 0.5px #e0443e;
+                    }
+                    .icon-minimize {
+                        background: #febc2e;
+                        box-shadow: 0 0 0 0.5px #d4a017;
+                    }
+                    .icon-maximize {
+                        background: #28c840;
+                        box-shadow: 0 0 0 0.5px #14ae35;
+                    }
+                    .icon svg {
+                        opacity: 0;
+                        transition: opacity 80ms ease;
+                    }
+                    .header-icon:hover .icon svg {
+                        opacity: 1;
+                    }
+                    .icon svg {
+                        width: 6px;
+                        height: 6px;
+                        stroke: rgba(0,0,0,0.55);
+                        fill: none;
+                        stroke-width: 1.2;
+                        stroke-linecap: round;
+                    }
+                    @media (max-width: 680px) {
+                        .alas-titlebar-drag-zone {
+                            inset-right: 88px;
+                        }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+
+            const titlebar = document.createElement('div');
+            titlebar.id = 'alas-launcher-titlebar';
+            titlebar.innerHTML = `
+                <div class="alas-titlebar-drag-zone" aria-hidden="true"></div>
+                <div class="header-icon">
+                    <button type="button" class="icon icon-maximize" data-action="maximize" aria-label="Maximize/Restore window" title="Maximize">
+                        <svg viewBox="0 0 6 6" class="svg-restore" style="display:none">
+                            <polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/>
+                        </svg>
+                        <svg viewBox="0 0 6 6" class="svg-maximize">
+                            <polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/>
+                        </svg>
+                    </button>
+                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="Minimize window" title="Minimize">
+                        <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
+                    </button>
+                    <button type="button" class="icon icon-close" data-action="close" aria-label="Close window" title="Close">
+                        <svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg>
+                    </button>
+                </div>
+            `;
+
+            document.body.dataset.alasCustomTitlebar = 'true';
+            document.body.prepend(titlebar);
+
+            const dragZone = titlebar.querySelector('.alas-titlebar-drag-zone');
+            const maximizeButton = titlebar.querySelector('[data-action="maximize"]');
+
+            const syncMaximizeState = async () => {
+                if (!maximizeButton) return;
+                try {
+                    const maximized = await invoke('window_is_maximized');
+                    maximizeButton.dataset.maximized = maximized ? 'true' : 'false';
+                    maximizeButton.title = maximized ? 'Restore' : 'Maximize';
+                    maximizeButton.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+                    maximizeButton.querySelector('.svg-maximize').style.display = maximized ? 'none' : '';
+                    maximizeButton.querySelector('.svg-restore').style.display = maximized ? '' : 'none';
+                } catch (e) {
+                    console.error('Failed to sync maximize state', e);
+                }
+            };
+
+            titlebar.querySelectorAll('button[data-action]').forEach(button => {
+                button.addEventListener('click', async event => {
+                    event.stopPropagation();
+                    try {
+                        switch (button.dataset.action) {
+                            case 'minimize':
+                                await invoke('window_minimize');
+                                break;
+                            case 'maximize':
+                                await invoke('window_toggle_maximize');
+                                await syncMaximizeState();
+                                break;
+                            case 'close':
+                                await invoke('window_close');
+                                break;
+                            default:
+                                break;
+                        }
+                    } catch (error) {
+                        console.error(`Failed to handle ${button.dataset.action} window action`, error);
+                    }
+                });
+            });
+
+            dragZone.addEventListener('mousedown', event => {
+                if (event.button !== 0 || event.target.closest('button')) {
+                    return;
+                }
+                invoke('window_start_dragging').catch(error => {
+                    console.error('Failed to start dragging from titlebar', error);
+                });
+            });
+            dragZone.addEventListener('dblclick', async event => {
+                if (event.target.closest('button')) {
+                    return;
+                }
+                try {
+                    await invoke('window_toggle_maximize');
+                    await syncMaximizeState();
+                } catch (error) {
+                    console.error('Failed to toggle maximize from titlebar', error);
+                }
+            });
+
+            window.addEventListener('resize', () => {
+                void syncMaximizeState();
+            });
+
+            void syncMaximizeState();
+        };
+
+        ensureTitlebar();
+        if (!document.body) {
+            window.addEventListener('DOMContentLoaded', ensureTitlebar, { once: true });
+        }
+        "#
+    }
 }
