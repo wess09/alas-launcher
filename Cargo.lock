@@ -3,30 +3,6 @@
 version = 4
 
 [[package]]
-name = "AlasLauncher"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "command-group",
- "ctrlc",
- "dirs",
- "nix 0.30.1",
- "openssl-probe",
- "serde",
- "serde_json",
- "serde_yaml",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-single-instance",
- "tracing",
- "tracing-subscriber",
- "winapi",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -48,6 +24,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "alas-launcher"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "command-group",
+ "ctrlc",
+ "dirs",
+ "nix 0.30.1",
+ "openssl-probe",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-single-instance",
+ "tracing",
+ "tracing-subscriber",
+ "winapi",
 ]
 
 [[package]]
