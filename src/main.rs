@@ -96,6 +96,7 @@ fn main() -> Result<()> {
                 main_window.set_decorations(false)?;
                 if let Some(splash) = app.get_webview_window("splash") {
                     splash.set_decorations(false)?;
+                    splash.set_resizable(true)?;
                 }
             }
 
@@ -370,17 +371,32 @@ fn splash_shell_html() -> String {
         String::new()
     } else {
         r#"
-  <div id="alas-splash-titlebar" class="splash-titlebar" data-tauri-drag-region>
-    <div class="splash-titlebar-brand" data-tauri-drag-region>
+  <div id="alas-splash-titlebar" class="splash-titlebar">
+    <div class="splash-titlebar-drag">
+      <div class="splash-titlebar-brand">
       <span class="splash-titlebar-dot"></span>
       <span>ALAS Launcher</span>
+      </div>
     </div>
-    <div class="splash-titlebar-actions">
-      <button type="button" id="alas-splash-minimize" class="splash-titlebar-button" aria-label="Minimize window" title="Minimize">
-        <span class="splash-icon splash-icon-minimize" aria-hidden="true"></span>
+    <div class="splash-titlebar-actions" style="display: flex;">
+      <button type="button" id="alas-splash-maximize" class="splash-titlebar-button splash-titlebar-button-maximize" aria-label="Maximize window" title="Maximize" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
+        <svg viewBox="0 0 8 8" class="splash-svg-restore" style="display:none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;" aria-hidden="true">
+          <polyline points="1,4 1,1 4,1"></polyline><polyline points="4,7 7,7 7,4"></polyline>
+        </svg>
+        <svg viewBox="0 0 8 8" class="splash-svg-maximize" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;" aria-hidden="true">
+          <polyline points="1,3.5 1,1 3.5,1"></polyline><polyline points="4.5,7 7,7 7,4.5"></polyline>
+        </svg>
       </button>
-      <button type="button" id="alas-splash-close" class="splash-titlebar-button splash-titlebar-button-close" aria-label="Close window" title="Close">
-        <span class="splash-icon splash-icon-close" aria-hidden="true"></span>
+      <button type="button" id="alas-splash-minimize" class="splash-titlebar-button splash-titlebar-button-minimize" aria-label="Minimize window" title="Minimize" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
+        <svg viewBox="0 0 8 8" aria-hidden="true" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;">
+          <line x1="1" y1="4" x2="7" y2="4"></line>
+        </svg>
+      </button>
+      <button type="button" id="alas-splash-close" class="splash-titlebar-button splash-titlebar-button-close" aria-label="Close window" title="Close" style="display: inline-flex; justify-content: center; align-items: center; width: 46px; height: 100%; min-height: 32px; padding: 0; border: none; background: transparent; color: #333; cursor: pointer; -webkit-app-region: no-drag;">
+        <svg viewBox="0 0 8 8" aria-hidden="true" style="width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round;">
+          <line x1="1.5" y1="1.5" x2="6.5" y2="6.5"></line>
+          <line x1="6.5" y1="1.5" x2="1.5" y2="6.5"></line>
+        </svg>
       </button>
     </div>
   </div>
@@ -398,15 +414,51 @@ fn splash_shell_html() -> String {
       }
 
       const titlebar = document.getElementById('alas-splash-titlebar');
+      const dragZone = document.querySelector('.splash-titlebar-drag');
+      const maximizeButton = document.getElementById('alas-splash-maximize');
       const minimizeButton = document.getElementById('alas-splash-minimize');
       const closeButton = document.getElementById('alas-splash-close');
 
-      if (titlebar) {
-        titlebar.addEventListener('mousedown', event => {
+      const syncMaximizeState = async () => {
+        if (!maximizeButton) {
+          return;
+        }
+        try {
+          const maximized = await invoke('window_is_maximized');
+          maximizeButton.title = maximized ? 'Restore' : 'Maximize';
+          maximizeButton.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+          const maximizeSvg = maximizeButton.querySelector('.splash-svg-maximize');
+          const restoreSvg = maximizeButton.querySelector('.splash-svg-restore');
+          if (maximizeSvg) maximizeSvg.style.display = maximized ? 'none' : '';
+          if (restoreSvg) restoreSvg.style.display = maximized ? '' : 'none';
+        } catch (error) {
+          console.error('Failed to sync splash maximize state', error);
+        }
+      };
+
+      if (dragZone) {
+        dragZone.addEventListener('mousedown', event => {
           if (event.button !== 0 || event.target.closest('button')) {
             return;
           }
           invoke('window_start_dragging').catch(error => console.error('Failed to start dragging splash window', error));
+        });
+        dragZone.addEventListener('dblclick', event => {
+          if (event.target.closest('button')) {
+            return;
+          }
+          invoke('window_toggle_maximize')
+            .then(() => syncMaximizeState())
+            .catch(error => console.error('Failed to toggle splash maximize from drag zone', error));
+        });
+      }
+
+      if (maximizeButton) {
+        maximizeButton.addEventListener('click', event => {
+          event.stopPropagation();
+          invoke('window_toggle_maximize')
+            .then(() => syncMaximizeState())
+            .catch(error => console.error('Failed to toggle splash maximize', error));
         });
       }
 
@@ -423,6 +475,8 @@ fn splash_shell_html() -> String {
           invoke('window_close').catch(error => console.error('Failed to close splash window', error));
         });
       }
+
+      void syncMaximizeState();
     })();
 "#
         .to_string()
@@ -476,6 +530,13 @@ fn splash_shell_html() -> String {
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
   }}
+  .splash-titlebar-drag {{
+    flex: 1 1 auto;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }}
   .splash-titlebar-brand {{
     display: flex;
     align-items: center;
@@ -497,64 +558,48 @@ fn splash_shell_html() -> String {
   .splash-titlebar-actions {{
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    padding: 0 12px;
     flex-shrink: 0;
   }}
   .splash-titlebar-button {{
-    width: 28px;
-    height: 28px;
+    width: 12px;
+    height: 12px;
     border: none;
-    border-radius: 8px;
-    background: rgba(234, 241, 248, 0.92);
-    color: #233446;
+    border-radius: 50%;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: background 120ms ease, transform 120ms ease, color 120ms ease;
-  }}
-  .splash-titlebar-button:hover {{
-    background: rgba(220, 230, 240, 0.98);
+    position: relative;
+    transition: filter 120ms ease;
+    flex: 0 0 auto;
+    padding: 0;
   }}
   .splash-titlebar-button:active {{
-    transform: scale(0.96);
+    filter: brightness(0.85);
   }}
-  .splash-titlebar-button-close:hover {{
-    background: #de4d49;
-    color: #fff;
+  .splash-titlebar-button-close {{
+    background: #ff5f57;
+    box-shadow: 0 0 0 0.5px #e0443e;
   }}
-  .splash-icon {{
-    position: relative;
-    display: inline-block;
-    width: 12px;
-    height: 12px;
+  .splash-titlebar-button-minimize {{
+    background: #febc2e;
+    box-shadow: 0 0 0 0.5px #d4a017;
   }}
-  .splash-icon-minimize::before {{
-    content: "";
-    position: absolute;
-    left: 1px;
-    right: 1px;
-    bottom: 2px;
-    height: 1.5px;
-    background: currentColor;
-    border-radius: 999px;
+  .splash-titlebar-button-maximize {{
+    background: #28c840;
+    box-shadow: 0 0 0 0.5px #14ae35;
   }}
-  .splash-icon-close::before,
-  .splash-icon-close::after {{
-    content: "";
-    position: absolute;
-    top: 0.5px;
-    left: 5.25px;
-    width: 1.5px;
-    height: 11px;
-    background: currentColor;
-    border-radius: 999px;
-  }}
-  .splash-icon-close::before {{
-    transform: rotate(45deg);
-  }}
-  .splash-icon-close::after {{
-    transform: rotate(-45deg);
+  .splash-titlebar-button svg {{
+    width: 7px;
+    height: 7px;
+    stroke: rgba(0, 0, 0, 0.72);
+    fill: none;
+    stroke-width: 1.35;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 1;
   }}
   .wrap {{
     width: 100%;
@@ -942,19 +987,13 @@ fn main_window_titlebar_injection_script() -> &'static str {
                         box-shadow: 0 0 0 0.5px #14ae35;
                     }
                     .icon svg {
-                        opacity: 0;
-                        transition: opacity 80ms ease;
-                    }
-                    .header-icon:hover .icon svg {
-                        opacity: 1;
-                    }
-                    .icon svg {
-                        width: 6px;
-                        height: 6px;
-                        stroke: rgba(0,0,0,0.55);
+                        width: 8px;
+                        height: 8px;
+                        stroke: rgba(0,0,0,0.86);
                         fill: none;
-                        stroke-width: 1.2;
+                        stroke-width: 1.45;
                         stroke-linecap: round;
+                        stroke-linejoin: round;
                     }
                     @media (max-width: 680px) {
                         .alas-titlebar-drag-zone {
