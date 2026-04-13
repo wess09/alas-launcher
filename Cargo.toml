@@ -1,5 +1,5 @@
 [package]
-name = "AlasLauncher"
+name = "alas-launcher"
 version = "0.1.1"
 description = "New ALAS launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
