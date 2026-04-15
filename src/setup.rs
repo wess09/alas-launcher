@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
@@ -54,6 +55,9 @@ enum ScriptPhase {
     Git,
     Dependencies { total_packages: usize },
 }
+
+const MAX_UPDATE_RETRIES: usize = 20;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn alas_repo_dir() -> PathBuf {
     // Always check if this is a typical same-folder portable distribution
@@ -283,6 +287,55 @@ fn run_python_script(
     Ok(())
 }
 
+fn run_python_script_with_retry(
+    script: &str,
+    mut status_updater: impl FnMut(SplashUpdate),
+    phase: ScriptPhase,
+) -> Result<()> {
+    for retry in 0..=MAX_UPDATE_RETRIES {
+        match run_python_script(script, &mut status_updater, phase) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if retry == MAX_UPDATE_RETRIES {
+                    return Err(err);
+                }
+
+                let retry_count = retry + 1;
+                let error_text = err.to_string();
+                warn!(
+                    "{} failed (retry {retry_count}/{MAX_UPDATE_RETRIES}): {error_text}",
+                    phase_display_name(phase)
+                );
+                status_updater(splash_retry_update(phase, retry_count, &error_text));
+                thread::sleep(RETRY_DELAY);
+            }
+        }
+    }
+
+    unreachable!()
+}
+
+fn phase_display_name(phase: ScriptPhase) -> &'static str {
+    match phase {
+        ScriptPhase::Git => "Git update",
+        ScriptPhase::Dependencies { .. } => "Dependency update",
+    }
+}
+
+fn splash_retry_update(phase: ScriptPhase, retry_count: usize, error_text: &str) -> SplashUpdate {
+    let detail = format!(
+        "Attempt failed ({retry_count}/{MAX_UPDATE_RETRIES}), retrying in 1 second: {error_text}"
+    );
+    match phase {
+        ScriptPhase::Git => SplashUpdate::loading("Updating ALAS", detail, 18)
+            .with_subtitle("Syncing repository..."),
+        ScriptPhase::Dependencies { .. } => {
+            SplashUpdate::loading("Installing dependencies", detail, 64)
+                .with_subtitle("Syncing Python packages...")
+        }
+    }
+}
+
 fn git_update(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
     // Decorate execute() to get fetch progress
     let script = r#"
@@ -297,7 +350,7 @@ gm = deploy.git.GitManager()
 gm.execute = decorate_execute(gm.execute)
 gm.git_install()
 "#;
-    run_python_script(script, status_updater, ScriptPhase::Git)
+    run_python_script_with_retry(script, status_updater, ScriptPhase::Git)
 }
 
 fn pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
@@ -307,7 +360,7 @@ import deploy.pip
 pm = deploy.pip.PipManager()
 pm.pip_install()
 "#;
-    run_python_script(
+    run_python_script_with_retry(
         script,
         status_updater,
         ScriptPhase::Dependencies {
