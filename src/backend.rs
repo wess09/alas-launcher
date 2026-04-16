@@ -13,6 +13,7 @@ use crate::window_util::CreateNoWindow as _;
 
 pub struct ManagedBackend {
     child: Option<GroupChild>,
+    preserve_on_drop: bool,
 }
 
 impl ManagedBackend {
@@ -23,7 +24,10 @@ impl ManagedBackend {
             .group()
             .create_no_window()
             .spawn()?;
-        let res = Self { child: Some(child) };
+        let res = Self {
+            child: Some(child),
+            preserve_on_drop: false,
+        };
 
         let address = format!("127.0.0.1:{}", port).parse().unwrap();
         let start_time = std::time::Instant::now();
@@ -57,10 +61,21 @@ impl ManagedBackend {
             Ok(ExitStatus::default())
         }
     }
+
+    pub fn detach_for_self_update(&mut self) {
+        self.preserve_on_drop = true;
+        if let Some(child) = self.child.take() {
+            // Keep gui.py alive while the launcher restarts itself.
+            std::mem::forget(child);
+        }
+    }
 }
 
 impl Drop for ManagedBackend {
     fn drop(&mut self) {
+        if self.preserve_on_drop {
+            return;
+        }
         if let Some(mut child) = self.child.take() {
             match child.kill() {
                 Ok(_) => {}
@@ -79,5 +94,24 @@ impl Drop for ManagedBackend {
                 }
             }
         }
+    }
+}
+
+pub fn terminate_detached_backend(owner_pid: u32) {
+    let mut terminated = 0usize;
+    let matcher = format!("ALAS_LAUNCHER_PID={owner_pid}");
+    let sys = sysinfo::System::new_all();
+    for process in sys.processes().values() {
+        if process
+            .environ()
+            .iter()
+            .any(|var| var.to_str().unwrap_or_default() == matcher)
+            && process.kill()
+        {
+            terminated += 1;
+        }
+    }
+    if terminated == 0 {
+        warn!("No detached backend process found for launcher pid {owner_pid}");
     }
 }

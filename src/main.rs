@@ -3,16 +3,19 @@
 
 mod backend;
 mod setup;
+mod updater;
 mod window_util;
 
 use std::{
     cell::Cell,
     fs,
+    net::TcpStream,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread::{self},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -25,12 +28,13 @@ use tauri::{
     webview::{PageLoadEvent, PageLoadPayload},
     Manager, Url, WebviewWindow,
 };
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::{DialogExt, FilePath, MessageDialogButtons};
 use tracing::{error, info, warn};
 
 use crate::{
     backend::ManagedBackend,
     setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
+    updater::start_silent_launcher_update,
 };
 
 fn main() -> Result<()> {
@@ -57,8 +61,14 @@ fn main() -> Result<()> {
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
+    let close_prompt_active = Arc::new(AtomicBool::new(false));
+    let preserve_backend_on_exit = Arc::new(AtomicBool::new(false));
+    let reattach_backend_owner_pid = Arc::new(Mutex::new(None::<u32>));
 
     let allow_exit_for_setup = allow_exit.clone();
+    let close_prompt_active_for_run = close_prompt_active.clone();
+    let preserve_backend_on_exit_for_run = preserve_backend_on_exit.clone();
+    let reattach_backend_owner_pid_for_run = reattach_backend_owner_pid.clone();
 
     info!("Starting Webview...");
     tauri::Builder::default()
@@ -150,14 +160,21 @@ fn main() -> Result<()> {
             match event {
                 tauri::RunEvent::Ready => {
                     let allow_exit = allow_exit.clone();
+                    let preserve_backend_on_exit = preserve_backend_on_exit.clone();
                     let handle1 = app_handle.clone();
                     ctrlc::set_handler(move || {
                         info!("Received Ctrl-C, shutting down...");
                         allow_exit.store(true, Ordering::SeqCst);
                         handle1.exit(0);
                     }).expect("Error setting Ctrl-C handler");
+                    start_silent_launcher_update(
+                        app_handle.clone(),
+                        backend.clone(),
+                        preserve_backend_on_exit.clone(),
+                    );
                     let app_handle = app_handle.clone();
                     let backend = backend.clone();
+                    let reattach_backend_owner_pid = reattach_backend_owner_pid.clone();
                     thread::spawn(move || {
                         let splash = app_handle.get_webview_window("splash").unwrap();
                         initialize_splash(&splash);
@@ -171,6 +188,35 @@ fn main() -> Result<()> {
                             "The local WebUI is initializing. The window will open automatically when ready.",
                             4,
                         ));
+                        if is_reattach_mode() {
+                            status_updater(SplashUpdate::loading(
+                                "Restoring session",
+                                "Reconnecting to the existing local WebUI service.",
+                                92,
+                            ));
+                            if wait_for_webui_ready(port, Duration::from_secs(12)) {
+                                *reattach_backend_owner_pid.lock().unwrap() =
+                                    reattach_owner_pid_from_env();
+                                status_updater(SplashUpdate::loading(
+                                    "Opening window",
+                                    "The main window is ready and will appear now.",
+                                    100,
+                                ));
+                                let _ = splash.destroy();
+                                info!("Reattached to existing WebUI service");
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    let _ = window.set_resizable(true);
+                                    let _ = window.navigate(
+                                        Url::parse(&format!("http://127.0.0.1:{}/", port)).unwrap(),
+                                    );
+                                    let _ = reveal_window(&window);
+                                }
+                                return;
+                            }
+                            warn!(
+                                "Reattach mode requested but local WebUI was not reachable, continuing with full startup"
+                            );
+                        }
                         if let Err(e) = setup_alas_repo(&mut status_updater) {
                             error!("{e}");
                             status_updater(SplashUpdate::error(
@@ -221,22 +267,62 @@ fn main() -> Result<()> {
                     });
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
+                    if preserve_backend_on_exit_for_run.load(Ordering::SeqCst) {
+                        info!("Launcher exiting for self-update restart; backend will stay alive");
+                        return;
+                    }
                     info!("Webview closed, shutting down backend...");
                     if let Some(ref mut b) = *backend.lock().unwrap() {
                         if let Err(e) = b.terminate() {
                             warn!("Failed to terminate backend process: {:?}", e);
                         }
+                    } else if let Some(owner_pid) = *reattach_backend_owner_pid_for_run.lock().unwrap() {
+                        backend::terminate_detached_backend(owner_pid);
                     }
                 }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     info!("Window {} close requested", label);
-                    // Windows: hide main window to tray instead of quitting
+                    // Windows: ask whether to quit or minimize to tray.
                     #[cfg(windows)]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.hide();
+                            if close_prompt_active_for_run
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                let app_handle_for_dialog = app_handle.clone();
+                                let allow_exit_for_dialog = allow_exit.clone();
+                                let close_prompt_active_for_dialog = close_prompt_active_for_run.clone();
+
+                                if let Some(main_window) = app_handle.get_webview_window("main") {
+                                    app_handle
+                                        .dialog()
+                                        .message("确认要离开吗？您可以选择退出，或者让它在后台默默运行")
+                                        .title("退出")
+                                        .buttons(MessageDialogButtons::OkCancelCustom(
+                                            "退出".to_string(),
+                                            "最小化到托盘".to_string(),
+                                        ))
+                                        .parent(&main_window)
+                                        .show(move |should_exit| {
+                                            close_prompt_active_for_dialog
+                                                .store(false, Ordering::SeqCst);
+                                            if should_exit {
+                                                allow_exit_for_dialog.store(true, Ordering::SeqCst);
+                                                app_handle_for_dialog.exit(0);
+                                            } else if let Some(w) =
+                                                app_handle_for_dialog.get_webview_window("main")
+                                            {
+                                                let _ = w.hide();
+                                            }
+                                        });
+                                } else {
+                                    close_prompt_active_for_run.store(false, Ordering::SeqCst);
+                                    if let Some(w) = app_handle.get_webview_window("main") {
+                                        let _ = w.hide();
+                                    }
+                                }
                             }
                             return;
                         }
@@ -706,6 +792,33 @@ fn toggle_main_window_visibility(app: &tauri::AppHandle) {
             let _ = reveal_window(&window);
         }
     }
+}
+
+fn wait_for_webui_ready(port: u16, timeout: Duration) -> bool {
+    let address = format!("127.0.0.1:{port}");
+    let Ok(sock_addr) = address.parse() else {
+        return false;
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if TcpStream::connect_timeout(&sock_addr, Duration::from_millis(200)).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+fn is_reattach_mode() -> bool {
+    std::env::var("ALAS_LAUNCHER_REATTACH")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn reattach_owner_pid_from_env() -> Option<u32> {
+    std::env::var("ALAS_LAUNCHER_REATTACH_OWNER_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
 }
 
 fn main_window_titlebar_injection_script() -> &'static str {

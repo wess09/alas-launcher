@@ -235,6 +235,41 @@ jobs:
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$($env:PROCESSOR_ARCHITECTURE.ToLower()).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('AzurLaneAutoScript')
             "@
+      - name: Prepare launcher updater payload
+        uses: knicknic/os-specific-run@v1.0.3
+        with:
+          linux: |
+            arch=$(uname -m)
+            case "$arch" in
+              x86_64) arch_key="x86_64" ;;
+              aarch64|arm64) arch_key="aarch64" ;;
+              i686|i386) arch_key="i686" ;;
+              armv7l) arch_key="armv7" ;;
+              *) echo "Unsupported architecture: $arch"; exit 1 ;;
+            esac
+            mkdir -p launcher-updater
+            cp target/release/alas-launcher "launcher-updater/alas-launcher-linux-$arch_key"
+          macos: |
+            arch=$(uname -m)
+            case "$arch" in
+              x86_64) arch_key="x86_64" ;;
+              aarch64|arm64) arch_key="aarch64" ;;
+              *) echo "Unsupported architecture: $arch"; exit 1 ;;
+            esac
+            mkdir -p launcher-updater
+            cp target/release/alas-launcher "launcher-updater/alas-launcher-darwin-$arch_key"
+          windows: |
+            $arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
+            if ($arch -eq "amd64") { $arch = "x86_64" }
+            elseif ($arch -eq "x86") { $arch = "i686" }
+            elseif ($arch -eq "arm64") { $arch = "aarch64" }
+            mkdir -ea 0 launcher-updater
+            cp target\release\alas-launcher.exe ("launcher-updater\\alas-launcher-windows-" + $arch + ".exe")
+      - name: Upload launcher updater payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-updater-${{ matrix.os }}
+          path: launcher-updater/*
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -255,3 +290,94 @@ jobs:
           files: |
             AzurLaneAutoScript-${{ runner.os }}-*
             AzurLaneAutoScript-CN-${{ runner.os }}-*
+
+  deploy-launcher-update:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    env:
+      UPDATE_BASE_URL: https://alas.nanoda.work/updata
+    steps:
+      - name: Download launcher updater payloads
+        uses: actions/download-artifact@v4
+        with:
+          pattern: launcher-updater-*
+          merge-multiple: true
+          path: launcher-updater
+      - name: Build stable.json
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          base_url = os.environ["UPDATE_BASE_URL"].rstrip("/")
+          version = os.environ["VERSION"].strip()
+          if version.startswith("v"):
+              version = version[1:]
+
+          root = Path("launcher-updater")
+          files = sorted(
+              p for p in root.glob("alas-launcher-*")
+              if p.is_file() and p.name != "stable.json"
+          )
+          if not files:
+              raise SystemExit("No launcher payloads found in launcher-updater/")
+
+          platforms = {}
+          for file_path in files:
+              name = file_path.name
+              key = name[len("alas-launcher-"):]
+              if key.endswith(".exe"):
+                  key = key[:-4]
+              digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+              platforms[key] = {
+                  "url": f"{base_url}/{name}",
+                  "sha256": digest,
+              }
+
+          manifest = {
+              "version": version,
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+              "notes": f"Launcher auto update {version}",
+              "platforms": platforms,
+          }
+          (root / "stable.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Trust deployment host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Upload updater files to OpenResty path
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: /opt/1panel/www/sites/alas.nanoda.work/index/updata
+        run: |
+          set -eu
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          INCOMING="${DEPLOY_PATH}/.incoming-${GITHUB_RUN_ID}"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}' '${INCOMING}'"
+          for file in launcher-updater/alas-launcher-*; do
+            [ -f "${file}" ] || continue
+            scp -P "${DEPLOY_PORT}" "${file}" "${REMOTE}:${INCOMING}/"
+          done
+          scp -P "${DEPLOY_PORT}" launcher-updater/stable.json "${REMOTE}:${INCOMING}/stable.json"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "set -eu
+            find '${INCOMING}' -maxdepth 1 -type f ! -name 'stable.json' -exec mv -f {} '${DEPLOY_PATH}/' \;
+            mv -f '${INCOMING}/stable.json' '${DEPLOY_PATH}/stable.json'
+            rm -rf '${INCOMING}'
+          "
