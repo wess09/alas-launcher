@@ -25,7 +25,10 @@ use tauri::{
     webview::{PageLoadEvent, PageLoadPayload},
     Manager, Url, WebviewWindow,
 };
-use tauri_plugin_dialog::{DialogExt, FilePath, MessageDialogButtons};
+use tauri_plugin_dialog::DialogExt;
+#[cfg(windows)]
+use tauri_plugin_dialog::MessageDialogButtons;
+use tauri_plugin_dialog::FilePath;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -57,9 +60,11 @@ fn main() -> Result<()> {
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
+    #[cfg(windows)]
     let close_prompt_active = Arc::new(AtomicBool::new(false));
 
     let allow_exit_for_setup = allow_exit.clone();
+    #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
     info!("Starting Webview...");
@@ -99,8 +104,8 @@ fn main() -> Result<()> {
                 main_window.set_decorations(false)?;
             }
 
-            // Windows: create system tray
-            #[cfg(windows)]
+            // Windows and macOS: create system tray
+            #[cfg(any(windows, target_os = "macos"))]
             {
                 let allow_exit = allow_exit_for_setup.clone();
                 let show_item = MenuItemBuilder::new("Show / Hide")
@@ -114,13 +119,35 @@ fn main() -> Result<()> {
                     .separator()
                     .item(&quit_item)
                     .build()?;
-                TrayIconBuilder::with_id("main-tray")
-                    .icon(Image::from_path("icons/icon.png").unwrap_or_else(|_| {
-                        app.default_window_icon().unwrap().clone()
-                    }))
+                
+                // Load tray icon - use .icns on macOS, .png on Windows/Linux
+                #[cfg(target_os = "macos")]
+                let icon = Image::from_path("icons/icon.icns").unwrap_or_else(|_| {
+                    app.default_window_icon().unwrap().clone()
+                });
+                #[cfg(not(target_os = "macos"))]
+                let icon = Image::from_path("icons/icon.png").unwrap_or_else(|_| {
+                    app.default_window_icon().unwrap().clone()
+                });
+                
+                let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                    .icon(icon)
                     .tooltip("Alas Launcher")
-                    .menu(&tray_menu)
-                    .show_menu_on_left_click(false)
+                    .menu(&tray_menu);
+                
+                // On Windows, show menu on right click
+                #[cfg(windows)]
+                {
+                    tray_builder = tray_builder.show_menu_on_left_click(false);
+                }
+                
+                // On macOS, show menu on left click
+                #[cfg(target_os = "macos")]
+                {
+                    tray_builder = tray_builder.show_menu_on_left_click(true);
+                }
+                
+                tray_builder
                     .on_menu_event(move |app, event| match event.id().as_ref() {
                         "toggle_visibility" => {
                             toggle_main_window_visibility(app);
@@ -223,62 +250,85 @@ fn main() -> Result<()> {
                         reveal_window(&window).unwrap();
                     });
                 }
-                tauri::RunEvent::ExitRequested { .. } => {
+                tauri::RunEvent::ExitRequested { api, .. } => {
                     info!("Webview closed, shutting down backend...");
                     if let Some(ref mut b) = *backend.lock().unwrap() {
                         if let Err(e) = b.terminate() {
                             warn!("Failed to terminate backend process: {:?}", e);
                         }
                     }
+
+                    // Only exit if explicitly allowed (e.g., via tray menu Quit)
+                    #[cfg(any(windows, target_os = "macos"))]
+                    {
+                        if !allow_exit.load(Ordering::SeqCst) {
+                            info!("Exit prevented: app is minimized to tray");
+                            api.prevent_exit();
+                            // Hide main window instead of exiting
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                        }
+                    }
                 }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     info!("Window {} close requested", label);
-                    // Windows: ask whether to quit or minimize to tray.
-                    #[cfg(windows)]
+                    // Windows and macOS: ask whether to quit or minimize to tray (Windows only shows dialog on Windows)
+                    #[cfg(any(windows, target_os = "macos"))]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            if close_prompt_active_for_run
-                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                                .is_ok()
+                            #[cfg(windows)]
                             {
-                                let app_handle_for_dialog = app_handle.clone();
-                                let allow_exit_for_dialog = allow_exit.clone();
-                                let close_prompt_active_for_dialog = close_prompt_active_for_run.clone();
+                                if close_prompt_active_for_run
+                                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                    .is_ok()
+                                {
+                                    let app_handle_for_dialog = app_handle.clone();
+                                    let allow_exit_for_dialog = allow_exit.clone();
+                                    let close_prompt_active_for_dialog = close_prompt_active_for_run.clone();
 
-                                if let Some(main_window) = app_handle.get_webview_window("main") {
-                                    app_handle
-                                        .dialog()
-                                        .message("确认要离开吗？您可以选择退出，或者让它在后台默默运行")
-                                        .title("退出")
-                                        .buttons(MessageDialogButtons::OkCancelCustom(
-                                            "退出".to_string(),
-                                            "最小化到托盘".to_string(),
-                                        ))
-                                        .parent(&main_window)
-                                        .show(move |should_exit| {
-                                            close_prompt_active_for_dialog
-                                                .store(false, Ordering::SeqCst);
-                                            if should_exit {
-                                                allow_exit_for_dialog.store(true, Ordering::SeqCst);
-                                                app_handle_for_dialog.exit(0);
-                                            } else if let Some(w) =
-                                                app_handle_for_dialog.get_webview_window("main")
-                                            {
-                                                let _ = w.hide();
-                                            }
-                                        });
-                                } else {
-                                    close_prompt_active_for_run.store(false, Ordering::SeqCst);
-                                    if let Some(w) = app_handle.get_webview_window("main") {
-                                        let _ = w.hide();
+                                    if let Some(main_window) = app_handle.get_webview_window("main") {
+                                        app_handle
+                                            .dialog()
+                                            .message("确认要离开吗？您可以选择退出，或者让它在后台默默运行")
+                                            .title("退出")
+                                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                                "退出".to_string(),
+                                                "最小化到托盘".to_string(),
+                                            ))
+                                            .parent(&main_window)
+                                            .show(move |should_exit| {
+                                                close_prompt_active_for_dialog
+                                                    .store(false, Ordering::SeqCst);
+                                                if should_exit {
+                                                    allow_exit_for_dialog.store(true, Ordering::SeqCst);
+                                                    app_handle_for_dialog.exit(0);
+                                                } else if let Some(w) =
+                                                    app_handle_for_dialog.get_webview_window("main")
+                                                {
+                                                    let _ = w.hide();
+                                                }
+                                            });
+                                    } else {
+                                        close_prompt_active_for_run.store(false, Ordering::SeqCst);
+                                        if let Some(w) = app_handle.get_webview_window("main") {
+                                            let _ = w.hide();
+                                        }
                                     }
+                                }
+                            }
+                            // On macOS, silently hide to tray (no dialog)
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(w) = app_handle.get_webview_window("main") {
+                                    let _ = w.hide();
                                 }
                             }
                             return;
                         }
                     }
-                    // Non-main windows or non-Windows: exit
+                    // Non-main windows or non-Windows/macOS: exit
                     app_handle.exit(0);
                 }
                 _ => {}
