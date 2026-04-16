@@ -862,6 +862,9 @@ fn main_window_titlebar_injection_script() -> &'static str {
             titlebar.innerHTML = `
                 <div class="alas-titlebar-drag-zone" aria-hidden="true"></div>
                 <div class="header-icon">
+                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="最小化窗口" title="最小化">
+                        <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
+                    </button>
                     <button type="button" class="icon icon-maximize" data-action="maximize" aria-label="最大化/还原窗口" title="最大化">
                         <svg viewBox="0 0 6 6" class="svg-restore" style="display:none">
                             <polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/>
@@ -870,9 +873,7 @@ fn main_window_titlebar_injection_script() -> &'static str {
                             <polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/>
                         </svg>
                     </button>
-                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="最小化窗口" title="最小化">
-                        <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
-                    </button>
+
                     <button type="button" class="icon icon-close" data-action="close" aria-label="关闭窗口" title="关闭">
                         <svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg>
                     </button>
