@@ -334,9 +334,12 @@ jobs:
               key = name[len("alas-launcher-"):]
               if key.endswith(".exe"):
                   key = key[:-4]
+              url_name = name
+              if name.startswith("alas-launcher-windows-") and name.endswith(".exe"):
+                  url_name = "alas-launcher.exe"
               digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
               platforms[key] = {
-                  "url": f"{base_url}/{name}",
+                  "url": f"{base_url}/{url_name}",
                   "sha256": digest,
               }
 
@@ -373,7 +376,12 @@ jobs:
           ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}' '${INCOMING}'"
           for file in launcher-updater/alas-launcher-*; do
             [ -f "${file}" ] || continue
-            scp -P "${DEPLOY_PORT}" "${file}" "${REMOTE}:${INCOMING}/"
+            filename="$(basename "${file}")"
+            remote_name="${filename}"
+            if [[ "${filename}" == alas-launcher-windows-*.exe ]]; then
+              remote_name="alas-launcher.exe"
+            fi
+            scp -P "${DEPLOY_PORT}" "${file}" "${REMOTE}:${INCOMING}/${remote_name}"
           done
           scp -P "${DEPLOY_PORT}" launcher-updater/stable.json "${REMOTE}:${INCOMING}/stable.json"
           ssh -p "${DEPLOY_PORT}" "${REMOTE}" "set -eu
