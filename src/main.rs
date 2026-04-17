@@ -348,27 +348,77 @@ fn main() -> Result<()> {
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     debug!("Window {} close requested", label);
                     
-                    // Main window: prevent close and minimize to tray if not explicitly exiting
-                    if label == "main" && !allow_exit.load(Ordering::SeqCst) {
-                        api.prevent_close();
-                        
-                        // Hide the window to tray
-                        if let Some(w) = app_handle.get_webview_window("main") {
-                            let _ = w.hide();
+                    // Windows: ask whether to quit or minimize to tray.
+                    #[cfg(windows)]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if close_prompt_active_for_run
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                let app_handle_for_dialog = app_handle.clone();
+                                let allow_exit_for_dialog = allow_exit.clone();
+                                let close_prompt_active_for_dialog = close_prompt_active_for_run.clone();
+
+                                if let Some(main_window) = app_handle.get_webview_window("main") {
+                                    app_handle
+                                        .dialog()
+                                        .message("确认要离开吗？您可以选择退出，或者让它在后台默默运行")
+                                        .title("退出")
+                                        .buttons(MessageDialogButtons::OkCancelCustom(
+                                            "退出".to_string(),
+                                            "最小化到托盘".to_string(),
+                                        ))
+                                        .parent(&main_window)
+                                        .show(move |should_exit| {
+                                            close_prompt_active_for_dialog
+                                                .store(false, Ordering::SeqCst);
+                                            if should_exit {
+                                                allow_exit_for_dialog.store(true, Ordering::SeqCst);
+                                                app_handle_for_dialog.exit(0);
+                                            } else if let Some(w) =
+                                                app_handle_for_dialog.get_webview_window("main")
+                                            {
+                                                let _ = w.hide();
+                                            }
+                                        });
+                                } else {
+                                    close_prompt_active_for_run.store(false, Ordering::SeqCst);
+                                    if let Some(w) = app_handle.get_webview_window("main") {
+                                        let _ = w.hide();
+                                    }
+                                }
+                            }
+                            return;
                         }
-                        // Switch to Accessory policy so macOS does not terminate the app
-                        // when no Regular windows are visible.
-                        // (tao does not implement applicationShouldTerminateAfterLastWindowClosed:,
-                        // so the default macOS behaviour for Regular apps is to terminate.)
-                        #[cfg(target_os = "macos")]
-                        {
-                            set_macos_activation_policy(&app_handle, false);
-                        }
-                        return;
                     }
                     
-                    // For non-main windows or when allow_exit is true, allow normal close
-                    // The app will exit through ExitRequested handler
+                    // macOS: switch to Accessory policy so the app does not terminate
+                    // when no Regular windows are visible.
+                    #[cfg(target_os = "macos")]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            set_macos_activation_policy(&app_handle, false);
+                            return;
+                        }
+                    }
+                    
+                    // Linux: just hide to tray
+                    #[cfg(target_os = "linux")]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            return;
+                        }
+                    }
                 }
 
                 _ => {}
