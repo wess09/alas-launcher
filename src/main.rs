@@ -25,13 +25,64 @@ use tauri::{
     webview::{PageLoadEvent, PageLoadPayload},
     Manager, Url, WebviewWindow,
 };
-use tauri_plugin_dialog::{DialogExt, FilePath, MessageDialogButtons};
-use tracing::{error, info, warn};
+use tauri_plugin_dialog::DialogExt;
+#[cfg(windows)]
+use tauri_plugin_dialog::MessageDialogButtons;
+use tauri_plugin_dialog::FilePath;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     backend::ManagedBackend,
     setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
 };
+
+#[cfg(target_os = "macos")]
+const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
+#[cfg(target_os = "macos")]
+const MENUBAR_ICON_1X: &[u8] = include_bytes!("../icons/menubar.png");
+#[cfg(windows)]
+const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
+
+#[cfg(target_os = "macos")]
+fn tray_icon_for_platform() -> Image<'static> {
+    info!("Loading macOS tray icon from embedded bytes...");
+    let result = Image::from_bytes(MENUBAR_ICON_2X)
+        .or_else(|_| {
+            info!("2x icon failed, trying 1x...");
+            Image::from_bytes(MENUBAR_ICON_1X)
+        })
+        .unwrap_or_else(|err| {
+            error!(
+                ?err,
+                "Failed to load tray icon from embedded menubar icon bytes (2x and 1x)."
+            );
+            panic!("Failed to load tray icon from embedded menubar icon bytes: {err}");
+        });
+    info!("Tray icon loaded successfully");
+    result
+}
+
+#[cfg(windows)]
+fn tray_icon_for_platform() -> Image<'static> {
+    Image::from_bytes(WINDOWS_TRAY_ICON)
+        .unwrap_or_else(|err| {
+            error!(?err, "Failed to load tray icon from embedded icon bytes.");
+            panic!("Failed to load tray icon from embedded icon bytes: {err}");
+        })
+}
+
+/// Set macOS activation policy to Regular (show in dock) or Accessory (hide from dock).
+#[cfg(target_os = "macos")]
+fn set_macos_activation_policy(app: &tauri::AppHandle, regular: bool) {
+    let policy = if regular {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(e) = app.set_activation_policy(policy) {
+        error!("Failed to set activation policy: {}", e);
+    }
+}
 
 fn main() -> Result<()> {
     #[cfg(windows)]
@@ -41,7 +92,12 @@ fn main() -> Result<()> {
         use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
         HAS_CONSOLE.store(AttachConsole(ATTACH_PARENT_PROCESS) != 0, Ordering::Relaxed);
     }
-    tracing_subscriber::fmt::init();
+    // Initialize logger with debug level support
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+    
+    info!("=== Alas Launcher starting ===");
     setup_environment()?;
 
     let port = get_deploy_config()
@@ -57,9 +113,11 @@ fn main() -> Result<()> {
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
+    #[cfg(windows)]
     let close_prompt_active = Arc::new(AtomicBool::new(false));
 
     let allow_exit_for_setup = allow_exit.clone();
+    #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
     info!("Starting Webview...");
@@ -75,6 +133,8 @@ fn main() -> Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                set_macos_activation_policy(app, true);
                 let _ = reveal_window(&window);
             }
         }))
@@ -99,9 +159,10 @@ fn main() -> Result<()> {
                 main_window.set_decorations(false)?;
             }
 
-            // Windows: create system tray
-            #[cfg(windows)]
+            // Windows and macOS: create system tray
+            #[cfg(any(windows, target_os = "macos"))]
             {
+                info!("Creating system tray...");
                 let allow_exit = allow_exit_for_setup.clone();
                 let show_item = MenuItemBuilder::new("Show / Hide")
                     .id("toggle_visibility")
@@ -114,14 +175,35 @@ fn main() -> Result<()> {
                     .separator()
                     .item(&quit_item)
                     .build()?;
-                TrayIconBuilder::with_id("main-tray")
-                    .icon(Image::from_path("icons/icon.png").unwrap_or_else(|_| {
-                        app.default_window_icon().unwrap().clone()
-                    }))
+                
+                info!("Tray menu created successfully");
+                
+                // Use embedded icon bytes so packaged apps always load the tray icon correctly.
+                let icon = tray_icon_for_platform();
+                
+                info!("Building tray icon...");
+                let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                    .icon(icon)
                     .tooltip("Alas Launcher")
-                    .menu(&tray_menu)
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                    .menu(&tray_menu);
+                
+                // On Windows, show menu on right click
+                #[cfg(windows)]
+                {
+                    tray_builder = tray_builder.show_menu_on_left_click(false);
+                }
+                
+                // On macOS, show menu on left click
+                #[cfg(target_os = "macos")]
+                {
+                    info!("Setting macOS tray to show menu on left click");
+                    tray_builder = tray_builder.show_menu_on_left_click(true);
+                }
+                
+                match tray_builder
+                    .on_menu_event(move |app, event| {
+                        debug!("Tray menu event: {:?}", event.id());
+                        match event.id().as_ref() {
                         "toggle_visibility" => {
                             toggle_main_window_visibility(app);
                         }
@@ -130,6 +212,7 @@ fn main() -> Result<()> {
                             app.exit(0);
                         }
                         _ => {}
+                    }
                     })
                     .on_tray_icon_event(|tray, event| {
                         if let tauri::tray::TrayIconEvent::Click {
@@ -142,7 +225,15 @@ fn main() -> Result<()> {
                             toggle_main_window_visibility(&app);
                         }
                     })
-                    .build(app)?;
+                    .build(app) {
+                        Ok(_) => {
+                            info!("System tray created successfully!");
+                        }
+                        Err(e) => {
+                            error!("Failed to create system tray: {:?}", e);
+                            return Err(Box::new(e));
+                        }
+                    }
             }
 
             Ok(())
@@ -151,10 +242,10 @@ fn main() -> Result<()> {
         .run(move |app_handle, event| {
             match event {
                 tauri::RunEvent::Ready => {
+                    debug!("RunEvent::Ready");
                     let allow_exit = allow_exit.clone();
                     let handle1 = app_handle.clone();
                     ctrlc::set_handler(move || {
-                        info!("Received Ctrl-C, shutting down...");
                         allow_exit.store(true, Ordering::SeqCst);
                         handle1.exit(0);
                     }).expect("Error setting Ctrl-C handler");
@@ -213,7 +304,11 @@ fn main() -> Result<()> {
                             "The main window is ready and will appear now.",
                             100,
                         ));
-                        splash.destroy().unwrap();
+                        // 🔑 关键改变：不销毁 splash 窗口，而是隐藏它作为后台保活窗口
+                        // 这样当主窗口隐藏到托盘时，应用不会因为"最后一个窗口关闭"而退出
+                        let _ = splash.hide();
+                        debug!("Hidden splash window to keep app alive in background");
+                        
                         info!("Webview is ready");
                         let window = app_handle.get_webview_window("main").unwrap();
                         window.set_resizable(true).unwrap();
@@ -223,8 +318,27 @@ fn main() -> Result<()> {
                         reveal_window(&window).unwrap();
                     });
                 }
-                tauri::RunEvent::ExitRequested { .. } => {
-                    info!("Webview closed, shutting down backend...");
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    let should_allow = allow_exit.load(Ordering::SeqCst);
+                    debug!("ExitRequested event: allow_exit={}", should_allow);
+                    
+                    // Only exit if explicitly allowed (e.g., via tray menu Quit)
+                    if !should_allow {
+                        api.prevent_exit();
+                        debug!("Hiding main window to tray");
+                        // Hide main window instead of exiting
+                        if let Some(w) = app_handle.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            set_macos_activation_policy(&app_handle, false);
+                        }
+                        return;
+                    }
+
+                    debug!("allow_exit is TRUE, proceeding with app shutdown");
+                    info!("App exit allowed, shutting down backend...");
                     if let Some(ref mut b) = *backend.lock().unwrap() {
                         if let Err(e) = b.terminate() {
                             warn!("Failed to terminate backend process: {:?}", e);
@@ -232,7 +346,8 @@ fn main() -> Result<()> {
                     }
                 }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
-                    info!("Window {} close requested", label);
+                    debug!("Window {} close requested", label);
+                    
                     // Windows: ask whether to quit or minimize to tray.
                     #[cfg(windows)]
                     {
@@ -278,9 +393,34 @@ fn main() -> Result<()> {
                             return;
                         }
                     }
-                    // Non-main windows or non-Windows: exit
-                    app_handle.exit(0);
+                    
+                    // macOS: switch to Accessory policy so the app does not terminate
+                    // when no Regular windows are visible.
+                    #[cfg(target_os = "macos")]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            set_macos_activation_policy(&app_handle, false);
+                            return;
+                        }
+                    }
+                    
+                    // Linux: just hide to tray
+                    #[cfg(target_os = "linux")]
+                    {
+                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            return;
+                        }
+                    }
                 }
+
                 _ => {}
             };
         });
@@ -739,7 +879,11 @@ fn toggle_main_window_visibility(app: &tauri::AppHandle) {
         let is_minimized = window.is_minimized().unwrap_or(false);
         if is_visible && !is_minimized {
             let _ = window.hide();
+            #[cfg(target_os = "macos")]
+            set_macos_activation_policy(app, false);
         } else {
+            #[cfg(target_os = "macos")]
+            set_macos_activation_policy(app, true);
             let _ = reveal_window(&window);
         }
     }
