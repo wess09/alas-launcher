@@ -26,9 +26,9 @@ use tauri::{
     Manager, Url, WebviewWindow,
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::FilePath;
 #[cfg(windows)]
 use tauri_plugin_dialog::MessageDialogButtons;
-use tauri_plugin_dialog::FilePath;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -64,11 +64,10 @@ fn tray_icon_for_platform() -> Image<'static> {
 
 #[cfg(windows)]
 fn tray_icon_for_platform() -> Image<'static> {
-    Image::from_bytes(WINDOWS_TRAY_ICON)
-        .unwrap_or_else(|err| {
-            error!(?err, "Failed to load tray icon from embedded icon bytes.");
-            panic!("Failed to load tray icon from embedded icon bytes: {err}");
-        })
+    Image::from_bytes(WINDOWS_TRAY_ICON).unwrap_or_else(|err| {
+        error!(?err, "Failed to load tray icon from embedded icon bytes.");
+        panic!("Failed to load tray icon from embedded icon bytes: {err}");
+    })
 }
 
 /// Set macOS activation policy to Regular (show in dock) or Accessory (hide from dock).
@@ -96,7 +95,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
-    
+
     info!("=== Alas Launcher starting ===");
     setup_environment()?;
 
@@ -113,10 +112,13 @@ fn main() -> Result<()> {
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
+    let recreating_main_window = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
     let close_prompt_active = Arc::new(AtomicBool::new(false));
 
     let allow_exit_for_setup = allow_exit.clone();
+    let recreating_main_window_for_single_instance = recreating_main_window.clone();
+    let recreating_main_window_for_setup = recreating_main_window.clone();
     #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
@@ -131,39 +133,23 @@ fn main() -> Result<()> {
             window_is_maximized
         ])
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "macos")]
-                set_macos_activation_policy(app, true);
-                let _ = reveal_window(&window);
-            }
+        .plugin(tauri_plugin_single_instance::init(move |app, _argv, _cwd| {
+            restore_main_window_from_tray(
+                app,
+                port,
+                recreating_main_window_for_single_instance.clone(),
+            );
         }))
         .setup(move |app| {
-            let main_window = tauri::WebviewWindowBuilder::from_config(
-                app,
-                app.config()
-                    .app
-                    .windows
-                    .iter()
-                    .find(|w| w.label == "main")
-                    .unwrap(),
-            )?
-            .on_page_load(page_load_injector)
-            .build()?;
-            main_window.set_resizable(true)?;
-
-            // Windows/Linux: remove native decorations for main window only
-            // Splash window keeps native decorations (title bar)
-            #[cfg(not(target_os = "macos"))]
-            {
-                main_window.set_decorations(false)?;
-            }
+            create_main_window(&app.handle(), port)?;
 
             // Windows and macOS: create system tray
             #[cfg(any(windows, target_os = "macos"))]
             {
                 info!("Creating system tray...");
                 let allow_exit = allow_exit_for_setup.clone();
+                let recreating_main_window_for_menu = recreating_main_window_for_setup.clone();
+                let recreating_main_window_for_tray = recreating_main_window_for_setup.clone();
                 let show_item = MenuItemBuilder::new("Show / Hide")
                     .id("toggle_visibility")
                     .build(app)?;
@@ -175,37 +161,41 @@ fn main() -> Result<()> {
                     .separator()
                     .item(&quit_item)
                     .build()?;
-                
+
                 info!("Tray menu created successfully");
-                
+
                 // Use embedded icon bytes so packaged apps always load the tray icon correctly.
                 let icon = tray_icon_for_platform();
-                
+
                 info!("Building tray icon...");
                 let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .tooltip("Alas Launcher")
                     .menu(&tray_menu);
-                
+
                 // On Windows, show menu on right click
                 #[cfg(windows)]
                 {
                     tray_builder = tray_builder.show_menu_on_left_click(false);
                 }
-                
+
                 // On macOS, show menu on left click
                 #[cfg(target_os = "macos")]
                 {
                     info!("Setting macOS tray to show menu on left click");
                     tray_builder = tray_builder.show_menu_on_left_click(true);
                 }
-                
+
                 match tray_builder
                     .on_menu_event(move |app, event| {
                         debug!("Tray menu event: {:?}", event.id());
                         match event.id().as_ref() {
                         "toggle_visibility" => {
-                            toggle_main_window_visibility(app);
+                            toggle_main_window_visibility(
+                                app,
+                                port,
+                                recreating_main_window_for_menu.clone(),
+                            );
                         }
                         "quit" => {
                             allow_exit.store(true, Ordering::SeqCst);
@@ -214,7 +204,7 @@ fn main() -> Result<()> {
                         _ => {}
                     }
                     })
-                    .on_tray_icon_event(|tray, event| {
+                    .on_tray_icon_event(move |tray, event| {
                         if let tauri::tray::TrayIconEvent::Click {
                             button: tauri::tray::MouseButton::Left,
                             button_state: tauri::tray::MouseButtonState::Up,
@@ -222,7 +212,11 @@ fn main() -> Result<()> {
                         } = event
                         {
                             let app = tray.app_handle();
-                            toggle_main_window_visibility(&app);
+                            toggle_main_window_visibility(
+                                &app,
+                                port,
+                                recreating_main_window_for_tray.clone(),
+                            );
                         }
                     })
                     .build(app) {
@@ -304,11 +298,9 @@ fn main() -> Result<()> {
                             "The main window is ready and will appear now.",
                             100,
                         ));
-                        // 🔑 关键改变：不销毁 splash 窗口，而是隐藏它作为后台保活窗口
-                        // 这样当主窗口隐藏到托盘时，应用不会因为"最后一个窗口关闭"而退出
-                        let _ = splash.hide();
-                        debug!("Hidden splash window to keep app alive in background");
-                        
+                        let _ = splash.destroy();
+                        debug!("Destroyed splash window after startup");
+
                         info!("Webview is ready");
                         let window = app_handle.get_webview_window("main").unwrap();
                         window.set_resizable(true).unwrap();
@@ -321,19 +313,12 @@ fn main() -> Result<()> {
                 tauri::RunEvent::ExitRequested { api, .. } => {
                     let should_allow = allow_exit.load(Ordering::SeqCst);
                     debug!("ExitRequested event: allow_exit={}", should_allow);
-                    
+
                     // Only exit if explicitly allowed (e.g., via tray menu Quit)
                     if !should_allow {
                         api.prevent_exit();
-                        debug!("Hiding main window to tray");
-                        // Hide main window instead of exiting
-                        if let Some(w) = app_handle.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                        #[cfg(target_os = "macos")]
-                        {
-                            set_macos_activation_policy(&app_handle, false);
-                        }
+                        debug!("Minimizing main window to tray");
+                        minimize_main_window_to_tray(&app_handle);
                         return;
                     }
 
@@ -347,7 +332,7 @@ fn main() -> Result<()> {
                 }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     debug!("Window {} close requested", label);
-                    
+
                     // Windows: ask whether to quit or minimize to tray.
                     #[cfg(windows)]
                     {
@@ -377,45 +362,36 @@ fn main() -> Result<()> {
                                             if should_exit {
                                                 allow_exit_for_dialog.store(true, Ordering::SeqCst);
                                                 app_handle_for_dialog.exit(0);
-                                            } else if let Some(w) =
-                                                app_handle_for_dialog.get_webview_window("main")
-                                            {
-                                                let _ = w.hide();
+                                            } else {
+                                                minimize_main_window_to_tray(&app_handle_for_dialog);
                                             }
                                         });
                                 } else {
                                     close_prompt_active_for_run.store(false, Ordering::SeqCst);
-                                    if let Some(w) = app_handle.get_webview_window("main") {
-                                        let _ = w.hide();
-                                    }
+                                    minimize_main_window_to_tray(&app_handle);
                                 }
                             }
                             return;
                         }
                     }
-                    
+
                     // macOS: switch to Accessory policy so the app does not terminate
                     // when no Regular windows are visible.
                     #[cfg(target_os = "macos")]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.hide();
-                            }
-                            set_macos_activation_policy(&app_handle, false);
+                            minimize_main_window_to_tray(&app_handle);
                             return;
                         }
                     }
-                    
+
                     // Linux: just hide to tray
                     #[cfg(target_os = "linux")]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.hide();
-                            }
+                            minimize_main_window_to_tray(&app_handle);
                             return;
                         }
                     }
@@ -864,6 +840,31 @@ fn splash_shell_html() -> String {
     html
 }
 
+fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow> {
+    let main_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .ok_or_else(|| anyhow!("Main window config not found"))?;
+
+    let main_window = tauri::WebviewWindowBuilder::from_config(app, main_config)?
+        .on_page_load(page_load_injector)
+        .build()?;
+    main_window.set_resizable(true)?;
+
+    // Windows/Linux: remove native decorations for main window only.
+    // Splash window keeps native decorations (title bar).
+    #[cfg(not(target_os = "macos"))]
+    {
+        main_window.set_decorations(false)?;
+    }
+
+    main_window.navigate(Url::parse(&format!("http://127.0.0.1:{port}/"))?)?;
+    Ok(main_window)
+}
+
 fn reveal_window(window: &WebviewWindow) -> tauri::Result<()> {
     if window.is_minimized()? {
         window.unminimize()?;
@@ -873,19 +874,84 @@ fn reveal_window(window: &WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
-fn toggle_main_window_visibility(app: &tauri::AppHandle) {
+fn minimize_main_window_to_tray(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            info!("Destroying main window to release WebView resources while trayed");
+            if let Err(e) = window.destroy() {
+                warn!("Failed to destroy main window for tray mode: {:?}", e);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        set_macos_activation_policy(app, false);
+    }
+}
+
+fn restore_main_window_from_tray(
+    app: &tauri::AppHandle,
+    port: u16,
+    recreating_main_window: Arc<AtomicBool>,
+) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        set_macos_activation_policy(app, true);
+        let _ = reveal_window(&window);
+        return;
+    }
+
+    if recreating_main_window
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        debug!("Main window recreation already in progress");
+        return;
+    }
+
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        set_macos_activation_policy(&app_handle, true);
+
+        let result = (|| -> Result<()> {
+            let window = create_main_window(&app_handle, port)?;
+            reveal_window(&window)?;
+            Ok(())
+        })();
+
+        recreating_main_window.store(false, Ordering::SeqCst);
+
+        if let Err(e) = result {
+            error!("Failed to recreate main window from tray: {:?}", e);
+        }
+    });
+}
+
+fn toggle_main_window_visibility(
+    app: &tauri::AppHandle,
+    port: u16,
+    recreating_main_window: Arc<AtomicBool>,
+) {
     if let Some(window) = app.get_webview_window("main") {
         let is_visible = window.is_visible().unwrap_or(false);
         let is_minimized = window.is_minimized().unwrap_or(false);
         if is_visible && !is_minimized {
-            let _ = window.hide();
-            #[cfg(target_os = "macos")]
-            set_macos_activation_policy(app, false);
+            minimize_main_window_to_tray(app);
         } else {
-            #[cfg(target_os = "macos")]
-            set_macos_activation_policy(app, true);
-            let _ = reveal_window(&window);
+            restore_main_window_from_tray(app, port, recreating_main_window);
         }
+    } else {
+        restore_main_window_from_tray(app, port, recreating_main_window);
     }
 }
 
