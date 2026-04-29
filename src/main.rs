@@ -32,7 +32,7 @@ use tauri_plugin_dialog::MessageDialogButtons;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    backend::ManagedBackend,
+    backend::{ManagedBackend, WebuiLaunchConfig},
     setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
 };
 
@@ -99,16 +99,12 @@ fn main() -> Result<()> {
     info!("=== Alas Launcher starting ===");
     setup_environment()?;
 
-    let port = get_deploy_config()
-        .as_ref()
-        .and_then(|config| config.get("Deploy"))
-        .and_then(|deploy| deploy.get("Webui"))
-        .and_then(|webui| webui.get("WebuiPort"))
-        .and_then(|port| port.as_u64());
-    if port.is_none() {
-        warn!("WebuiPort not found in config, using default port 22267");
+    let deploy_config = get_deploy_config();
+    let webui_config = WebuiLaunchConfig::from_deploy_config(deploy_config.as_ref());
+    if deploy_config.is_none() {
+        warn!("config/deploy.yaml not found or invalid, using default WebUI launch config");
     }
-    let port = port.unwrap_or(22267) as u16;
+    let port = webui_config.port;
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
@@ -245,6 +241,7 @@ fn main() -> Result<()> {
                     }).expect("Error setting Ctrl-C handler");
                     let app_handle = app_handle.clone();
                     let backend = backend.clone();
+                    let webui_config = webui_config.clone();
                     thread::spawn(move || {
                         let splash = app_handle.get_webview_window("splash").unwrap();
                         initialize_splash(&splash);
@@ -277,7 +274,7 @@ fn main() -> Result<()> {
                             "The local WebUI is initializing. This usually takes a few seconds. The window will open automatically when ready.",
                             97,
                         ));
-                        let b = match ManagedBackend::new(port) {
+                        let b = match ManagedBackend::new(&webui_config) {
                             Ok(backend) => backend,
                             Err(e) => {
                                 error!("{e}");
