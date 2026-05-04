@@ -1,11 +1,9 @@
 # 核心 C 扩展库 (建议自带以减少下载失败率)
 numpy==2.4.3
 opencv-python==4.13.0.92
-onnxruntime==1.24.4
 scipy==1.17.1
 matplotlib==3.10.8
 pillow==12.1.1
-pywin32==311
 pyzmq==27.1.0
 lxml==6.0.2
 
