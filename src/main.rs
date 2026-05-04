@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod backend;
+mod notify;
 mod setup;
 mod window_util;
 
@@ -33,6 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     backend::{ManagedBackend, WebuiLaunchConfig},
+    notify::start_notify_stream,
     setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
 };
 
@@ -129,6 +131,7 @@ fn main() -> Result<()> {
             window_is_maximized
         ])
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(move |app, _argv, _cwd| {
             restore_main_window_from_tray(
                 app,
@@ -234,9 +237,10 @@ fn main() -> Result<()> {
                 tauri::RunEvent::Ready => {
                     debug!("RunEvent::Ready");
                     let allow_exit = allow_exit.clone();
+                    let allow_exit_for_ctrlc = allow_exit.clone();
                     let handle1 = app_handle.clone();
                     ctrlc::set_handler(move || {
-                        allow_exit.store(true, Ordering::SeqCst);
+                        allow_exit_for_ctrlc.store(true, Ordering::SeqCst);
                         handle1.exit(0);
                     }).expect("Error setting Ctrl-C handler");
                     let app_handle = app_handle.clone();
@@ -290,6 +294,7 @@ fn main() -> Result<()> {
                             }
                         };
                         *backend.lock().unwrap() = Some(b);
+                        start_notify_stream(app_handle.clone(), port, allow_exit.clone());
                         status_updater(SplashUpdate::loading(
                             "Opening window",
                             "The main window is ready and will appear now.",
