@@ -124,6 +124,7 @@ fn main() -> Result<()> {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             save_as,
+            window_hide,
             window_minimize,
             window_toggle_maximize,
             window_close,
@@ -430,6 +431,12 @@ fn save_as(app_handle: tauri::AppHandle, filename: &str, data: &str) {
             error!("Failed to decode file content: {:?}", e);
         }
     }
+}
+
+#[tauri::command]
+fn window_hide(app_handle: tauri::AppHandle) -> tauri::Result<()> {
+    minimize_main_window_to_tray(&app_handle);
+    Ok(())
 }
 
 #[tauri::command]
@@ -965,6 +972,8 @@ fn main_window_titlebar_injection_script() -> &'static str {
     #[cfg(not(target_os = "macos"))]
     {
         r#"
+        console.log("ALAS 标题栏脚本注入成功！");
+        alert("注入成功！");
         const invoke =
             (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
             || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
@@ -1002,7 +1011,7 @@ fn main_window_titlebar_injection_script() -> &'static str {
                     }
                     .alas-titlebar-drag-zone {
                         position: absolute;
-                        inset: 0 88px 0 0;
+                        inset: 0 120px 0 0;
                         height: 100%;
                         pointer-events: auto;
                         background: transparent;
@@ -1033,6 +1042,10 @@ fn main_window_titlebar_injection_script() -> &'static str {
                     }
                     .icon:active {
                         filter: brightness(0.85);
+                    }
+                    .icon-hide {
+                        background: #3b82f6;
+                        box-shadow: 0 0 0 0.5px #2563eb;
                     }
                     .icon-close {
                         background: #ff5f57;
@@ -1074,6 +1087,9 @@ fn main_window_titlebar_injection_script() -> &'static str {
             titlebar.innerHTML = `
                 <div class="alas-titlebar-drag-zone" aria-hidden="true"></div>
                 <div class="header-icon">
+                    <button type="button" class="icon icon-hide" data-action="hide" aria-label="最小化到托盘" title="最小化到托盘">
+                        <svg viewBox="0 0 6 6"><rect x="1" y="1" width="4" height="4" rx="1"/><path d="M2 3h2"/></svg>
+                    </button>
                     <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="最小化窗口" title="最小化">
                         <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
                     </button>
@@ -1117,6 +1133,9 @@ fn main_window_titlebar_injection_script() -> &'static str {
                     event.stopPropagation();
                     try {
                         switch (button.dataset.action) {
+                            case 'hide':
+                                await invoke('window_hide');
+                                break;
                             case 'minimize':
                                 await invoke('window_minimize');
                                 break;
