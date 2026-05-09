@@ -972,8 +972,6 @@ fn main_window_titlebar_injection_script() -> &'static str {
     #[cfg(not(target_os = "macos"))]
     {
         r#"
-        console.log("ALAS 标题栏脚本注入成功！");
-        alert("注入成功！");
         const invoke =
             (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
             || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
