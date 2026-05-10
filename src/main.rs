@@ -34,7 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     backend::{ManagedBackend, WebuiLaunchConfig},
-    notify::start_notify_stream,
+    notify::{start_notify_stream, NotificationClickHandler},
     setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
 };
 
@@ -117,6 +117,7 @@ fn main() -> Result<()> {
     let allow_exit_for_setup = allow_exit.clone();
     let recreating_main_window_for_single_instance = recreating_main_window.clone();
     let recreating_main_window_for_setup = recreating_main_window.clone();
+    let recreating_main_window_for_run = recreating_main_window.clone();
     #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
@@ -247,6 +248,7 @@ fn main() -> Result<()> {
                     let app_handle = app_handle.clone();
                     let backend = backend.clone();
                     let webui_config = webui_config.clone();
+                    let recreating_main_window_for_notify = recreating_main_window_for_run.clone();
                     thread::spawn(move || {
                         let splash = app_handle.get_webview_window("splash").unwrap();
                         initialize_splash(&splash);
@@ -295,7 +297,23 @@ fn main() -> Result<()> {
                             }
                         };
                         *backend.lock().unwrap() = Some(b);
-                        start_notify_stream(app_handle.clone(), port, allow_exit.clone());
+                        let notification_click: NotificationClickHandler = {
+                            let app_handle = app_handle.clone();
+                            let recreating_main_window = recreating_main_window_for_notify.clone();
+                            Arc::new(move || {
+                                restore_main_window_from_any_thread(
+                                    app_handle.clone(),
+                                    port,
+                                    recreating_main_window.clone(),
+                                );
+                            })
+                        };
+                        start_notify_stream(
+                            app_handle.clone(),
+                            port,
+                            allow_exit.clone(),
+                            notification_click,
+                        );
                         status_updater(SplashUpdate::loading(
                             "Opening window",
                             "The main window is ready and will appear now.",
@@ -333,8 +351,23 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => {
+                    restore_main_window_from_any_thread(
+                        app_handle.clone(),
+                        port,
+                        recreating_main_window_for_run.clone(),
+                    );
+                }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     debug!("Window {} close requested", label);
+
+                    if label == "splash" && !allow_exit.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        allow_exit.store(true, Ordering::SeqCst);
+                        app_handle.exit(0);
+                        return;
+                    }
 
                     // Windows: ask whether to quit or minimize to tray.
                     #[cfg(windows)]
@@ -904,6 +937,19 @@ fn minimize_main_window_to_tray(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     {
         set_macos_activation_policy(app, false);
+    }
+}
+
+fn restore_main_window_from_any_thread(
+    app: tauri::AppHandle,
+    port: u16,
+    recreating_main_window: Arc<AtomicBool>,
+) {
+    let app_for_restore = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || {
+        restore_main_window_from_tray(&app_for_restore, port, recreating_main_window);
+    }) {
+        warn!("Failed to schedule main window restore: {:?}", e);
     }
 }
 

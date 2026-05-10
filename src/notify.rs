@@ -8,18 +8,31 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use anyhow::{anyhow, Result};
+#[cfg(target_os = "linux")]
+use notify_rust::{Hint, Notification};
 use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "linux")))]
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, info, warn};
 
+pub type NotificationClickHandler = Arc<dyn Fn() + Send + Sync + 'static>;
+
 #[cfg(windows)]
-const WINDOWS_APP_ID: &str = "Alas Launcher";
+const WINDOWS_APP_ID: &str = "moe.taiho.alas-launcher.notification";
 #[cfg(windows)]
-const WINDOWS_APP_NAME: &str = "Alas Launcher";
+const WINDOWS_APP_NAME: &str = "有新的信息喵";
+
+#[cfg(windows)]
+const WINDOWS_NOTIFICATION_ICON: &[u8] = include_bytes!("../icons/icon.png");
 
 #[derive(Debug, Deserialize)]
 struct NotifyPayload {
@@ -28,7 +41,12 @@ struct NotifyPayload {
     content: Option<String>,
 }
 
-pub fn start_notify_stream(app: tauri::AppHandle, port: u16, allow_exit: Arc<AtomicBool>) {
+pub fn start_notify_stream(
+    app: tauri::AppHandle,
+    port: u16,
+    allow_exit: Arc<AtomicBool>,
+    on_click: NotificationClickHandler,
+) {
     thread::spawn(move || {
         let url = format!("http://127.0.0.1:{port}/api/notify_stream");
         let client = match Client::builder()
@@ -44,7 +62,7 @@ pub fn start_notify_stream(app: tauri::AppHandle, port: u16, allow_exit: Arc<Ato
 
         while !allow_exit.load(Ordering::SeqCst) {
             info!("Connecting to notify stream: {url}");
-            match read_notify_stream(&client, &url, &app, &allow_exit) {
+            match read_notify_stream(&client, &url, &app, &allow_exit, &on_click) {
                 Ok(()) => debug!("Notify stream ended"),
                 Err(e) => warn!("Notify stream disconnected: {e}"),
             }
@@ -61,6 +79,7 @@ fn read_notify_stream(
     url: &str,
     app: &tauri::AppHandle,
     allow_exit: &AtomicBool,
+    on_click: &NotificationClickHandler,
 ) -> Result<()> {
     let response = client.get(url).header(ACCEPT, "text/event-stream").send()?;
 
@@ -80,7 +99,7 @@ fn read_notify_stream(
 
         let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
-            dispatch_sse_data(&mut data_lines, app);
+            dispatch_sse_data(&mut data_lines, app, on_click);
             continue;
         }
 
@@ -89,11 +108,15 @@ fn read_notify_stream(
         }
     }
 
-    dispatch_sse_data(&mut data_lines, app);
+    dispatch_sse_data(&mut data_lines, app, on_click);
     Ok(())
 }
 
-fn dispatch_sse_data(data_lines: &mut Vec<String>, app: &tauri::AppHandle) {
+fn dispatch_sse_data(
+    data_lines: &mut Vec<String>,
+    app: &tauri::AppHandle,
+    on_click: &NotificationClickHandler,
+) {
     if data_lines.is_empty() {
         return;
     }
@@ -102,45 +125,79 @@ fn dispatch_sse_data(data_lines: &mut Vec<String>, app: &tauri::AppHandle) {
     data_lines.clear();
 
     match serde_json::from_str::<NotifyPayload>(&data) {
-        Ok(payload) => show_notification(app, payload),
+        Ok(payload) => show_notification(app, payload, on_click),
         Err(e) => warn!("Ignoring invalid notify payload: {e}; payload={data}"),
     }
 }
 
-fn show_notification(app: &tauri::AppHandle, payload: NotifyPayload) {
-    let title = clean_text(payload.title).unwrap_or_else(|| "Alas".to_owned());
-    let body = clean_text(payload.content)
-        .or_else(|| clean_text(payload.instance).map(|instance| format!("Instance: {instance}")))
+fn show_notification(
+    app: &tauri::AppHandle,
+    payload: NotifyPayload,
+    on_click: &NotificationClickHandler,
+) {
+    let NotifyPayload {
+        instance,
+        title,
+        content,
+    } = payload;
+    let title = clean_text(title).unwrap_or_else(|| "Alas".to_owned());
+    let body = clean_text(content)
+        .or_else(|| clean_text(instance).map(|instance| format!("Instance: {instance}")))
         .unwrap_or_else(|| "New notification".to_owned());
 
     #[cfg(windows)]
     {
-        if let Err(e) = show_windows_notification(&title, &body) {
+        if let Err(e) = show_windows_notification(&title, &body, on_click.clone()) {
             warn!("Failed to show Windows notification: {e}");
         }
         let _ = app;
     }
 
-    #[cfg(not(windows))]
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        warn!("Failed to show system notification: {e}");
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = show_linux_notification(&title, &body, on_click.clone()) {
+            warn!("Failed to show Linux notification: {e}");
+        }
+        let _ = app;
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+            warn!("Failed to show system notification: {e}");
+        }
+        let _ = on_click;
     }
 }
 
 #[cfg(windows)]
-fn show_windows_notification(title: &str, body: &str) -> Result<()> {
-    ensure_windows_app_user_model_id()?;
+fn show_windows_notification(
+    title: &str,
+    body: &str,
+    on_click: NotificationClickHandler,
+) -> Result<()> {
+    let icon_path = ensure_windows_app_user_model_id()?;
+    let icon_uri_path = icon_path.to_string_lossy().replace('\\', "/");
     tauri_winrt_notification::Toast::new(WINDOWS_APP_ID)
+        .icon(
+            Path::new(&icon_uri_path),
+            tauri_winrt_notification::IconCrop::Square,
+            WINDOWS_APP_NAME,
+        )
         .title(title)
         .text1(body)
         .duration(tauri_winrt_notification::Duration::Short)
+        .on_activated(move |_| {
+            on_click();
+            Ok(())
+        })
         .show()
         .map_err(|e| anyhow!("{e:?}"))
 }
 
 #[cfg(windows)]
-fn ensure_windows_app_user_model_id() -> Result<()> {
-    let exe = std::env::current_exe()?;
+fn ensure_windows_app_user_model_id() -> Result<PathBuf> {
+    let icon_path = ensure_windows_notification_icon()?;
     let key = windows_registry::CURRENT_USER
         .create(format!(r"SOFTWARE\Classes\AppUserModelId\{WINDOWS_APP_ID}"))
         .map_err(|e| anyhow!("{e:?}"))?;
@@ -149,8 +206,52 @@ fn ensure_windows_app_user_model_id() -> Result<()> {
         .map_err(|e| anyhow!("{e:?}"))?;
     key.set_string("IconBackgroundColor", "0")
         .map_err(|e| anyhow!("{e:?}"))?;
-    key.set_hstring("IconUri", &exe.as_path().into())
+    key.set_hstring("IconUri", &icon_path.as_path().into())
         .map_err(|e| anyhow!("{e:?}"))?;
+    Ok(icon_path)
+}
+
+#[cfg(windows)]
+fn ensure_windows_notification_icon() -> Result<PathBuf> {
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow!("Unable to resolve local app data directory"))?
+        .join("AlasLauncher");
+    fs::create_dir_all(&data_dir)?;
+
+    let icon_path = data_dir.join("notification-icon.png");
+    let should_write = fs::read(&icon_path)
+        .map(|current| current != WINDOWS_NOTIFICATION_ICON)
+        .unwrap_or(true);
+    if should_write {
+        fs::write(&icon_path, WINDOWS_NOTIFICATION_ICON)?;
+    }
+
+    Ok(icon_path)
+}
+
+#[cfg(target_os = "linux")]
+fn show_linux_notification(
+    title: &str,
+    body: &str,
+    on_click: NotificationClickHandler,
+) -> Result<()> {
+    let mut notification = Notification::new();
+    notification
+        .summary(title)
+        .body(body)
+        .auto_icon()
+        .action("default", "Open")
+        .hint(Hint::Resident(true));
+    let handle = notification.show()?;
+
+    thread::spawn(move || {
+        handle.wait_for_action(move |action| {
+            if action == "default" {
+                on_click();
+            }
+        });
+    });
+
     Ok(())
 }
 
