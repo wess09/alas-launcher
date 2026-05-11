@@ -28,8 +28,13 @@ pub type NotificationClickHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(windows)]
 const WINDOWS_APP_ID: &str = "moe.taiho.alas-launcher.notification";
-#[cfg(windows)]
 const WINDOWS_APP_NAME: &str = "有新的信息喵";
+
+const WINDOWS_APP_ID_UPDATE: &str = "moe.taiho.alas-launcher.notification.update";
+const WINDOWS_APP_NAME_UPDATE: &str = "有新的更新喵";
+
+const WINDOWS_APP_ID_ANNOUNCEMENT: &str = "moe.taiho.alas-launcher.notification.announcement";
+const WINDOWS_APP_NAME_ANNOUNCEMENT: &str = "有新的公告喵";
 
 #[cfg(windows)]
 const WINDOWS_NOTIFICATION_ICON: &[u8] = include_bytes!("../icons/icon.png");
@@ -39,6 +44,14 @@ struct NotifyPayload {
     instance: Option<String>,
     title: Option<String>,
     content: Option<String>,
+    updata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NotificationType {
+    Normal,
+    Update,
+    Announcement,
 }
 
 pub fn start_notify_stream(
@@ -139,15 +152,27 @@ fn show_notification(
         instance,
         title,
         content,
+        updata,
     } = payload;
-    let title = clean_text(title).unwrap_or_else(|| "Alas".to_owned());
+
+    let (title, notify_type) = if let Some(v) = updata {
+        if v.as_bool() == Some(true) || v.as_str() == Some("true") || v.as_str() == Some("ture") {
+            ("有新的更新喵~".to_owned(), NotificationType::Update)
+        } else if v.as_bool() == Some(false) || v.as_str() == Some("false") || v.as_str() == Some("fl") {
+            ("有新的公告喵~".to_owned(), NotificationType::Announcement)
+        } else {
+            (clean_text(title).unwrap_or_else(|| "Alas".to_owned()), NotificationType::Normal)
+        }
+    } else {
+        (clean_text(title).unwrap_or_else(|| "Alas".to_owned()), NotificationType::Normal)
+    };
     let body = clean_text(content)
         .or_else(|| clean_text(instance).map(|instance| format!("Instance: {instance}")))
         .unwrap_or_else(|| "New notification".to_owned());
 
     #[cfg(windows)]
     {
-        if let Err(e) = show_windows_notification(&title, &body, on_click.clone()) {
+        if let Err(e) = show_windows_notification(&title, &body, notify_type, on_click.clone()) {
             warn!("Failed to show Windows notification: {e}");
         }
         let _ = app;
@@ -174,15 +199,22 @@ fn show_notification(
 fn show_windows_notification(
     title: &str,
     body: &str,
+    notify_type: NotificationType,
     on_click: NotificationClickHandler,
 ) -> Result<()> {
-    let icon_path = ensure_windows_app_user_model_id()?;
+    let (app_id, app_name) = match notify_type {
+        NotificationType::Normal => (WINDOWS_APP_ID, WINDOWS_APP_NAME),
+        NotificationType::Update => (WINDOWS_APP_ID_UPDATE, WINDOWS_APP_NAME_UPDATE),
+        NotificationType::Announcement => (WINDOWS_APP_ID_ANNOUNCEMENT, WINDOWS_APP_NAME_ANNOUNCEMENT),
+    };
+
+    let icon_path = ensure_windows_app_user_model_id(app_id, app_name)?;
     let icon_uri_path = icon_path.to_string_lossy().replace('\\', "/");
-    tauri_winrt_notification::Toast::new(WINDOWS_APP_ID)
+    tauri_winrt_notification::Toast::new(app_id)
         .icon(
             Path::new(&icon_uri_path),
             tauri_winrt_notification::IconCrop::Square,
-            WINDOWS_APP_NAME,
+            app_name,
         )
         .title(title)
         .text1(body)
@@ -196,13 +228,13 @@ fn show_windows_notification(
 }
 
 #[cfg(windows)]
-fn ensure_windows_app_user_model_id() -> Result<PathBuf> {
+fn ensure_windows_app_user_model_id(id: &str, name: &str) -> Result<PathBuf> {
     let icon_path = ensure_windows_notification_icon()?;
     let key = windows_registry::CURRENT_USER
-        .create(format!(r"SOFTWARE\Classes\AppUserModelId\{WINDOWS_APP_ID}"))
+        .create(format!(r"SOFTWARE\Classes\AppUserModelId\{id}"))
         .map_err(|e| anyhow!("{e:?}"))?;
 
-    key.set_string("DisplayName", WINDOWS_APP_NAME)
+    key.set_string("DisplayName", name)
         .map_err(|e| anyhow!("{e:?}"))?;
     key.set_string("IconBackgroundColor", "0")
         .map_err(|e| anyhow!("{e:?}"))?;
