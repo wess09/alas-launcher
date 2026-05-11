@@ -1,6 +1,6 @@
 [package]
 name = "alas-launcher"
-version = "1.5.8"
+version = "1.5.9"
 description = "New ALAS launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
 edition = "2021"
@@ -18,12 +18,14 @@ dirs = "6"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tracing-appender = "0.2"
 command-group = "5.0.1"
 base64 = "0.22.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "=2.0.0"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 ctrlc = "3.5.0"
+chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }

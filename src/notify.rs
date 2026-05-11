@@ -158,13 +158,22 @@ fn show_notification(
     let (title, notify_type) = if let Some(v) = updata {
         if v.as_bool() == Some(true) || v.as_str() == Some("true") || v.as_str() == Some("ture") {
             ("有新的更新喵~".to_owned(), NotificationType::Update)
-        } else if v.as_bool() == Some(false) || v.as_str() == Some("false") || v.as_str() == Some("fl") {
+        } else if v.as_bool() == Some(false)
+            || v.as_str() == Some("false")
+            || v.as_str() == Some("fl")
+        {
             ("有新的公告喵~".to_owned(), NotificationType::Announcement)
         } else {
-            (clean_text(title).unwrap_or_else(|| "Alas".to_owned()), NotificationType::Normal)
+            (
+                clean_text(title).unwrap_or_else(|| "Alas".to_owned()),
+                NotificationType::Normal,
+            )
         }
     } else {
-        (clean_text(title).unwrap_or_else(|| "Alas".to_owned()), NotificationType::Normal)
+        (
+            clean_text(title).unwrap_or_else(|| "Alas".to_owned()),
+            NotificationType::Normal,
+        )
     };
     let body = clean_text(content)
         .or_else(|| clean_text(instance).map(|instance| format!("Instance: {instance}")))
@@ -205,7 +214,9 @@ fn show_windows_notification(
     let (app_id, app_name) = match notify_type {
         NotificationType::Normal => (WINDOWS_APP_ID, WINDOWS_APP_NAME),
         NotificationType::Update => (WINDOWS_APP_ID_UPDATE, WINDOWS_APP_NAME_UPDATE),
-        NotificationType::Announcement => (WINDOWS_APP_ID_ANNOUNCEMENT, WINDOWS_APP_NAME_ANNOUNCEMENT),
+        NotificationType::Announcement => {
+            (WINDOWS_APP_ID_ANNOUNCEMENT, WINDOWS_APP_NAME_ANNOUNCEMENT)
+        }
     };
 
     let icon_path = ensure_windows_app_user_model_id(app_id, app_name)?;

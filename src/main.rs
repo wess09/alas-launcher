@@ -9,15 +9,18 @@ mod window_util;
 use std::{
     cell::Cell,
     fs,
+    net::{SocketAddr, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread::{self},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
+use chrono::Local;
 use serde_json::to_string;
 use tauri::{
     image::Image,
@@ -31,6 +34,8 @@ use tauri_plugin_dialog::FilePath;
 #[cfg(windows)]
 use tauri_plugin_dialog::MessageDialogButtons;
 use tracing::{debug, error, info, warn};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     backend::{ManagedBackend, WebuiLaunchConfig},
@@ -44,6 +49,15 @@ const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
 const MENUBAR_ICON_1X: &[u8] = include_bytes!("../icons/menubar.png");
 #[cfg(windows)]
 const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
+const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(any(windows, target_os = "android"))]
+const BACKEND_ERROR_URL_BASE: &str = "http://alas-error.localhost/backend";
+#[cfg(not(any(windows, target_os = "android")))]
+const BACKEND_ERROR_URL_BASE: &str = "alas-error://localhost/backend";
+#[cfg(any(windows, target_os = "android"))]
+const SPLASH_URL: &str = "http://alas-splash.localhost/";
+#[cfg(not(any(windows, target_os = "android")))]
+const SPLASH_URL: &str = "alas-splash://localhost/";
 
 #[cfg(target_os = "macos")]
 fn tray_icon_for_platform() -> Image<'static> {
@@ -93,13 +107,11 @@ fn main() -> Result<()> {
         use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
         HAS_CONSOLE.store(AttachConsole(ATTACH_PARENT_PROCESS) != 0, Ordering::Relaxed);
     }
-    // Initialize logger with debug level support
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .init();
+    setup_environment()?;
+    let _log_guard = initialize_logging()?;
 
     info!("=== Alas Launcher starting ===");
-    setup_environment()?;
+    info!("Launcher log file: log/{}", today_launcher_log_filename());
 
     let deploy_config = get_deploy_config();
     let webui_config = WebuiLaunchConfig::from_deploy_config(deploy_config.as_ref());
@@ -123,8 +135,15 @@ fn main() -> Result<()> {
 
     info!("Starting Webview...");
     tauri::Builder::default()
+        .register_uri_scheme_protocol("alas-error", |_ctx, request| {
+            backend_error_response(request)
+        })
+        .register_uri_scheme_protocol("alas-splash", |_ctx, _request| splash_response())
         .invoke_handler(tauri::generate_handler![
             save_as,
+            download_today_gui_log,
+            download_today_launcher_log,
+            retry_backend_connection,
             window_hide,
             window_minimize,
             window_toggle_maximize,
@@ -268,7 +287,7 @@ fn main() -> Result<()> {
                             status_updater(SplashUpdate::error(
                                 "Launch failed",
                                 format!(
-                                    "Unable to prepare ALAS. Please run alas-launcher from Terminal for the detailed error log.\n\n{}",
+                                    "Unable to prepare ALAS. You can download the launcher log below for the detailed error.\n\n{}",
                                     e
                                 ),
                                 last_progress.get().max(8),
@@ -325,9 +344,9 @@ fn main() -> Result<()> {
                         info!("Webview is ready");
                         let window = app_handle.get_webview_window("main").unwrap();
                         window.set_resizable(true).unwrap();
-                        window
-                            .navigate(Url::parse(&format!("http://127.0.0.1:{}/", port)).unwrap())
-                            .unwrap();
+                        if let Err(e) = navigate_backend_or_error(&window, port) {
+                            error!("Failed to navigate main window: {:?}", e);
+                        }
                         reveal_window(&window).unwrap();
                     });
                 }
@@ -439,6 +458,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn initialize_logging() -> Result<WorkerGuard> {
+    fs::create_dir_all("log")?;
+    let log_filename = today_launcher_log_filename();
+    let file_appender = tracing_appender::rolling::never("log", log_filename);
+    let (non_blocking_file, guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking_file)
+        .with_ansi(false)
+        .with_target(false)
+        .with_filter(tracing::level_filters::LevelFilter::DEBUG);
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(tracing::level_filters::LevelFilter::DEBUG);
+
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+
+    Ok(guard)
+}
+
 #[tauri::command]
 fn save_as(app_handle: tauri::AppHandle, filename: &str, data: &str) {
     match BASE64_STANDARD.decode(data) {
@@ -464,6 +506,62 @@ fn save_as(app_handle: tauri::AppHandle, filename: &str, data: &str) {
             error!("Failed to decode file content: {:?}", e);
         }
     }
+}
+
+#[tauri::command]
+fn download_today_gui_log(app_handle: tauri::AppHandle) -> std::result::Result<String, String> {
+    download_log_file(app_handle, today_gui_log_filename(), "GUI")
+}
+
+#[tauri::command]
+fn download_today_launcher_log(
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<String, String> {
+    download_log_file(app_handle, today_launcher_log_filename(), "launcher")
+}
+
+fn download_log_file(
+    app_handle: tauri::AppHandle,
+    filename: String,
+    log_name: &str,
+) -> std::result::Result<String, String> {
+    let log_name = log_name.to_owned();
+    let source_path = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join("log")
+        .join(&filename);
+    let data = fs::read(&source_path)
+        .map_err(|e| format!("无法读取日志文件 {}: {}", source_path.to_string_lossy(), e))?;
+
+    app_handle
+        .dialog()
+        .file()
+        .set_file_name(&filename)
+        .save_file(move |path| {
+            let log_name_for_save = log_name.clone();
+            let result: Result<()> = (move || {
+                let file_path = path
+                    .as_ref()
+                    .and_then(FilePath::as_path)
+                    .ok_or_else(|| anyhow!("Invalid file path {:?}", &path))?;
+                fs::write(file_path, &data)?;
+                info!("Saved {} log to {:?}", log_name_for_save, file_path);
+                Ok(())
+            })();
+            if let Err(e) = result {
+                error!("Failed to save {} log: {:?}", log_name, e);
+            }
+        });
+
+    Ok(filename)
+}
+
+fn today_gui_log_filename() -> String {
+    format!("{}_gui.txt", Local::now().format("%Y-%m-%d"))
+}
+
+fn today_launcher_log_filename() -> String {
+    format!("{}_launcher.txt", Local::now().format("%Y-%m-%d"))
 }
 
 #[tauri::command]
@@ -501,6 +599,14 @@ fn window_start_dragging(window: WebviewWindow) -> tauri::Result<()> {
 #[tauri::command]
 fn window_is_maximized(window: WebviewWindow) -> tauri::Result<bool> {
     window.is_maximized()
+}
+
+#[tauri::command]
+fn retry_backend_connection(window: WebviewWindow, port: u16) -> std::result::Result<bool, String> {
+    navigate_backend_or_error(&window, port).map_err(|e| {
+        error!("Failed to retry backend connection: {:?}", e);
+        e.to_string()
+    })
 }
 
 fn page_load_injector(webview: WebviewWindow, payload: PageLoadPayload<'_>) {
@@ -548,10 +654,16 @@ __ALAS_TITLEBAR_SCRIPT__
 }
 
 fn initialize_splash(splash: &WebviewWindow) {
-    let html_json = to_string(&splash_shell_html()).unwrap();
-    let injected = format!("document.open();document.write({html_json});document.close();");
-    if let Err(e) = splash.eval(&injected) {
-        error!("Failed to initialize splash page: {:?}", e);
+    match Url::parse(SPLASH_URL) {
+        Ok(url) => {
+            if let Err(e) = splash.navigate(url) {
+                error!("Failed to navigate splash page: {:?}", e);
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        Err(e) => {
+            error!("Failed to parse splash URL: {:?}", e);
+        }
     }
 }
 
@@ -561,6 +673,364 @@ fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
     if let Err(e) = splash.eval(&script) {
         error!("Failed to update splash page: {:?}", e);
     }
+}
+
+fn backend_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/")
+}
+
+fn splash_response() -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )
+        .body(splash_shell_html().into_bytes())
+        .unwrap()
+}
+
+fn check_backend_connection(port: u16) -> Result<()> {
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT)
+        .map(|_| ())
+        .map_err(|e| anyhow!("Unable to connect to local backend at {address}: {e}"))
+}
+
+fn navigate_backend_or_error(window: &WebviewWindow, port: u16) -> Result<bool> {
+    match check_backend_connection(port) {
+        Ok(()) => {
+            let url = backend_url(port);
+            window.navigate(Url::parse(&url)?)?;
+            Ok(true)
+        }
+        Err(e) => {
+            warn!("Backend connection check failed before navigation: {:?}", e);
+            navigate_to_backend_error(window, port, &e.to_string())?;
+            Ok(false)
+        }
+    }
+}
+
+fn navigate_to_backend_error(window: &WebviewWindow, port: u16, error_detail: &str) -> Result<()> {
+    let url = backend_error_url(port, error_detail)?;
+    window.navigate(url)?;
+    Ok(())
+}
+
+fn backend_error_url(port: u16, error_detail: &str) -> Result<Url> {
+    let port = port.to_string();
+    Ok(Url::parse_with_params(
+        BACKEND_ERROR_URL_BASE,
+        [("port", port.as_str()), ("detail", error_detail)],
+    )?)
+}
+
+fn backend_error_response(
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let (port, detail) = backend_error_request_params(request.uri().to_string().as_str());
+    let html = backend_error_html(port, &detail);
+
+    tauri::http::Response::builder()
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )
+        .body(html.into_bytes())
+        .unwrap()
+}
+
+fn backend_error_request_params(uri: &str) -> (u16, String) {
+    let mut port = 22267;
+    let mut detail = "Unable to connect to local backend.".to_owned();
+
+    if let Ok(url) = Url::parse(uri) {
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "port" => {
+                    if let Ok(parsed_port) = value.parse::<u16>() {
+                        port = parsed_port;
+                    }
+                }
+                "detail" => detail = value.into_owned(),
+                _ => {}
+            }
+        }
+    }
+
+    (port, detail)
+}
+
+fn handle_backend_navigation(app: tauri::AppHandle, port: u16, url: &Url) -> bool {
+    if !is_backend_url(url, port) {
+        return true;
+    }
+
+    match check_backend_connection(port) {
+        Ok(()) => true,
+        Err(e) => {
+            let blocked_url = url.to_string();
+            warn!(
+                "Blocked navigation to unreachable backend {}: {:?}",
+                blocked_url, e
+            );
+            let error_detail = e.to_string();
+            thread::spawn(move || {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = navigate_to_backend_error(&window, port, &error_detail) {
+                        error!("Failed to show backend error page: {:?}", e);
+                    }
+                }
+            });
+            false
+        }
+    }
+}
+
+fn is_backend_url(url: &Url, port: u16) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+        && url.port_or_known_default() == Some(port)
+}
+
+fn backend_error_html(port: u16, error_detail: &str) -> String {
+    let backend_url_json = to_string(&backend_url(port)).unwrap();
+    let error_detail_json = to_string(error_detail).unwrap();
+    let titlebar_script = main_window_titlebar_injection_script();
+
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ALAS 后端连接失败</title>
+<style>
+  :root {{
+    color-scheme: light;
+    --bg: #f5f7fb;
+    --panel: #ffffff;
+    --border: #d9e2ee;
+    --text: #182230;
+    --muted: #5f6f84;
+    --danger: #c03434;
+    --danger-bg: #fff1f1;
+    --primary: #1f66ad;
+    --primary-hover: #18558f;
+  }}
+  * {{
+    box-sizing: border-box;
+  }}
+  html, body {{
+    min-height: 100%;
+    margin: 0;
+    font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+  }}
+  body {{
+    display: grid;
+    place-items: center;
+    padding: 72px 28px 32px;
+  }}
+  .panel {{
+    width: min(680px, 100%);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: 0 18px 44px rgba(21, 35, 54, 0.10);
+    padding: 32px;
+  }}
+  .mark {{
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid #f0caca;
+    font-size: 24px;
+    line-height: 1;
+    font-weight: 600;
+    margin-bottom: 20px;
+  }}
+  h1 {{
+    margin: 0;
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1.2;
+  }}
+  .lead {{
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.7;
+  }}
+  .details {{
+    margin: 24px 0 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fbfdff;
+  }}
+  .row {{
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 14px;
+    padding: 13px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.55;
+  }}
+  .row:first-child {{
+    border-top: 0;
+  }}
+  .label {{
+    color: var(--muted);
+  }}
+  .value {{
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  }}
+  .actions {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 24px;
+  }}
+  .action-button {{
+    min-height: 38px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0 16px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    color: #ffffff;
+    background: var(--primary);
+  }}
+  .action-button:hover {{
+    background: var(--primary-hover);
+  }}
+  .action-button:disabled {{
+    cursor: default;
+    opacity: 0.65;
+  }}
+  .status {{
+    min-height: 20px;
+    color: var(--muted);
+    font-size: 13px;
+  }}
+  @media (max-width: 560px) {{
+    body {{
+      padding: 64px 16px 22px;
+      place-items: start stretch;
+    }}
+    .panel {{
+      padding: 24px;
+    }}
+    h1 {{
+      font-size: 23px;
+    }}
+    .row {{
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }}
+    .action-button {{
+      width: 100%;
+    }}
+  }}
+</style>
+</head>
+<body>
+  <main class="panel">
+    <div class="mark">!</div>
+    <h1>后端连接失败</h1>
+    <p class="lead">启动器没有连上本地 ALAS WebUI。后端可能仍在启动、已经退出，或者端口被其他程序占用。</p>
+    <section class="details" aria-label="连接信息">
+      <div class="row">
+        <div class="label">地址</div>
+        <div id="backend-url" class="value"></div>
+      </div>
+      <div class="row">
+        <div class="label">错误</div>
+        <div id="error-detail" class="value"></div>
+      </div>
+    </section>
+    <div class="actions">
+      <button id="retry-button" class="action-button" type="button">重试连接</button>
+      <button id="gui-log-button" class="action-button" type="button">下载 WebUI 日志</button>
+      <button id="launcher-log-button" class="action-button" type="button">下载启动器日志</button>
+      <span id="retry-status" class="status"></span>
+    </div>
+  </main>
+  <script>
+    (function () {{
+{titlebar_script}
+    }})();
+
+    const backendUrl = {backend_url_json};
+    const errorDetail = {error_detail_json};
+    const port = {port};
+    const retryButton = document.getElementById('retry-button');
+    const guiLogButton = document.getElementById('gui-log-button');
+    const launcherLogButton = document.getElementById('launcher-log-button');
+    const retryStatus = document.getElementById('retry-status');
+    const invoke =
+      (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+      || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+
+    document.getElementById('backend-url').textContent = backendUrl;
+    document.getElementById('error-detail').textContent = errorDetail;
+
+    retryButton.addEventListener('click', async () => {{
+      retryButton.disabled = true;
+      retryStatus.textContent = '正在重新连接...';
+      try {{
+        if (typeof invoke !== 'function') {{
+          throw new Error('Tauri invoke is unavailable');
+        }}
+        const connected = await invoke('retry_backend_connection', {{ port }});
+        if (!connected) {{
+          retryStatus.textContent = '仍然无法连接。';
+          retryButton.disabled = false;
+        }}
+      }} catch (error) {{
+        retryStatus.textContent = '重试失败：' + (error && error.message ? error.message : error);
+        retryButton.disabled = false;
+      }}
+    }});
+
+    async function downloadLog(button, command, label) {{
+      button.disabled = true;
+      retryStatus.textContent = '正在准备' + label + '...';
+      try {{
+        if (typeof invoke !== 'function') {{
+          throw new Error('Tauri invoke is unavailable');
+        }}
+        const filename = await invoke(command);
+        retryStatus.textContent = '已打开保存窗口：' + filename;
+      }} catch (error) {{
+        retryStatus.textContent = label + '下载失败：' + (error && error.message ? error.message : error);
+      }} finally {{
+        button.disabled = false;
+      }}
+    }}
+
+    guiLogButton.addEventListener('click', () => {{
+      downloadLog(guiLogButton, 'download_today_gui_log', 'WebUI 日志');
+    }});
+
+    launcherLogButton.addEventListener('click', () => {{
+      downloadLog(launcherLogButton, 'download_today_launcher_log', '启动器日志');
+    }});
+  </script>
+</body>
+</html>"#
+    )
 }
 
 fn splash_shell_html() -> String {
@@ -601,6 +1071,29 @@ fn splash_shell_html() -> String {
     justify-content: center;
     padding: 0;
     position: relative;
+    isolation: isolate;
+  }}
+  body::before {{
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background:
+      linear-gradient(118deg, transparent 0 60%, rgba(24, 95, 165, 0.055) 60% 77%, transparent 77% 100%),
+      linear-gradient(146deg, rgba(226, 75, 74, 0.04) 0 16%, transparent 16% 100%),
+      linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  }}
+  body::after {{
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      linear-gradient(90deg, rgba(24, 95, 165, 0.055) 1px, transparent 1px),
+      linear-gradient(0deg, rgba(24, 95, 165, 0.045) 1px, transparent 1px);
+    background-size: 28px 28px;
+    mask-image: linear-gradient(90deg, rgba(0,0,0,0.28), transparent 48%, rgba(0,0,0,0.18));
   }}
 
 
@@ -611,10 +1104,39 @@ fn splash_shell_html() -> String {
     justify-content: center;
     align-items: center;
     padding-top: 0;
+    position: relative;
+  }}
+  .wrap::before,
+  .wrap::after {{
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    z-index: -1;
+  }}
+  .wrap::before {{
+    width: 180px;
+    height: 142px;
+    top: 10px;
+    right: 4px;
+    border: 1px solid rgba(24, 95, 165, 0.12);
+    background: rgba(255,255,255,0.36);
+    transform: skewX(-18deg);
+  }}
+  .wrap::after {{
+    width: 170px;
+    height: 118px;
+    left: -18px;
+    bottom: 4px;
+    border-top: 1px solid rgba(226, 75, 74, 0.12);
+    border-right: 1px solid rgba(226, 75, 74, 0.10);
+    background: rgba(226, 75, 74, 0.026);
+    transform: skewX(-18deg);
   }}
   .card {{
     width: calc(100% - 44px);
     padding: 1.2rem 1.35rem 1.1rem;
+    position: relative;
+    z-index: 1;
   }}
   .card-header {{
     display: flex;
@@ -747,6 +1269,18 @@ fn splash_shell_html() -> String {
     font-size: 11.5px;
     color: var(--color-text-secondary);
   }}
+  .prog-meta-main {{
+    min-width: 0;
+  }}
+  .splash-actions {{
+    display: none;
+    margin-top: 10px;
+  }}
+  .splash-actions-err {{
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+  }}
   .prog-pct {{
     font-weight: 500;
     color: #185fa5;
@@ -754,6 +1288,24 @@ fn splash_shell_html() -> String {
   }}
   .prog-pct-err {{
     color: #a32d2d;
+  }}
+  .splash-log-button {{
+    min-height: 26px;
+    border: 1px solid #b5d4f4;
+    border-radius: 6px;
+    padding: 0 10px;
+    font: inherit;
+    font-size: 11.5px;
+    color: #185fa5;
+    background: #f7fbff;
+    cursor: pointer;
+  }}
+  .splash-log-button:hover {{
+    background: #eaf4ff;
+  }}
+  .splash-log-button:disabled {{
+    cursor: default;
+    opacity: 0.65;
   }}
   @media (max-height: 260px) {{
     .card {{
@@ -830,8 +1382,11 @@ fn splash_shell_html() -> String {
           <div id="progress-fill" class="prog-fill" style="width: 0%;"></div>
         </div>
         <div class="prog-meta">
-          <span id="progress-meta">The window opens automatically when ready</span>
+          <span id="progress-meta" class="prog-meta-main">The window opens automatically when ready</span>
           <span id="progress-pct" class="prog-pct">0%</span>
+        </div>
+        <div id="splash-actions" class="splash-actions">
+          <button id="splash-log-button" class="splash-log-button" type="button">下载启动器日志</button>
         </div>
       </div>
     </div>
@@ -844,11 +1399,13 @@ fn splash_shell_html() -> String {
       const errorDot = document.getElementById('error-dot');
       const progressFill = document.getElementById('progress-fill');
       const progressPct = document.getElementById('progress-pct');
+      const progressMeta = document.getElementById('progress-meta');
+      const splashActions = document.getElementById('splash-actions');
 
       document.getElementById('subtitle').textContent = payload.subtitle || '';
       document.getElementById('title').textContent = payload.title || '';
       document.getElementById('detail').textContent = payload.detail || '';
-      document.getElementById('progress-meta').textContent = payload.is_error
+      progressMeta.textContent = payload.is_error
         ? 'Stopped during initialization'
         : 'The window opens automatically when ready';
 
@@ -863,6 +1420,7 @@ fn splash_shell_html() -> String {
         errorDot.style.display = 'flex';
         progressFill.className = 'prog-fill prog-fill-err';
         progressPct.className = 'prog-pct prog-pct-err';
+        splashActions.className = 'splash-actions splash-actions-err';
       }} else {{
         badge.textContent = 'Loading';
         badge.className = 'badge';
@@ -870,8 +1428,30 @@ fn splash_shell_html() -> String {
         errorDot.style.display = 'none';
         progressFill.className = 'prog-fill';
         progressPct.className = 'prog-pct';
+        splashActions.className = 'splash-actions';
       }}
     }};
+
+    document.getElementById('splash-log-button').addEventListener('click', async () => {{
+      const button = document.getElementById('splash-log-button');
+      const progressMeta = document.getElementById('progress-meta');
+      button.disabled = true;
+      progressMeta.textContent = 'Preparing launcher log...';
+      try {{
+        const invoke =
+          (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+          || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+        if (typeof invoke !== 'function') {{
+          throw new Error('Tauri invoke is unavailable');
+        }}
+        const filename = await invoke('download_today_launcher_log');
+        progressMeta.textContent = 'Save dialog opened: ' + filename;
+      }} catch (error) {{
+        progressMeta.textContent = 'Launcher log download failed: ' + (error && error.message ? error.message : error);
+      }} finally {{
+        button.disabled = false;
+      }}
+    }});
   </script>
 </body>
 </html>"#,
@@ -891,7 +1471,9 @@ fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow
         .find(|w| w.label == "main")
         .ok_or_else(|| anyhow!("Main window config not found"))?;
 
+    let app_for_navigation = app.clone();
     let main_window = tauri::WebviewWindowBuilder::from_config(app, main_config)?
+        .on_navigation(move |url| handle_backend_navigation(app_for_navigation.clone(), port, url))
         .on_page_load(page_load_injector)
         .build()?;
     main_window.set_resizable(true)?;
@@ -903,7 +1485,6 @@ fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow
         main_window.set_decorations(false)?;
     }
 
-    main_window.navigate(Url::parse(&format!("http://127.0.0.1:{port}/"))?)?;
     Ok(main_window)
 }
 
@@ -980,6 +1561,7 @@ fn restore_main_window_from_tray(
 
         let result = (|| -> Result<()> {
             let window = create_main_window(&app_handle, port)?;
+            navigate_backend_or_error(&window, port)?;
             reveal_window(&window)?;
             Ok(())
         })();
