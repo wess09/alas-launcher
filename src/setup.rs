@@ -404,6 +404,7 @@ fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
         move || {
             let mut cmd = Command::new("python");
             cmd.args(["-m", "uv", "pip", "install"])
+                .arg("--break-system-packages")
                 .arg("-r")
                 .arg(&requirements_file)
                 .env("UV_SYSTEM_PYTHON", "1")
@@ -562,6 +563,7 @@ fn is_uv_progress_line(line: &str) -> bool {
         || line.starts_with("Audited ")
         || line.starts_with("warning: ")
         || line.starts_with("hint: ")
+        || line.starts_with("note: ")
 }
 
 fn extract_uv_package_name(line: &str) -> Option<String> {
