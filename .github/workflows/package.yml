@@ -138,12 +138,12 @@ jobs:
             tar -xvf adb.zip
       - name: Get ALAS
         run: |
-          git clone https://github.com/wess09/AzurPilot.git --depth=1
+          git clone https://github.com/wess09/AzurPilot.git AzurLaneAutoScript --depth=1
       - name: Distribute
         uses: knicknic/os-specific-run@v1.0.3
         with:
           macos: |
-            cd AzurPilot
+            cd AzurLaneAutoScript
 
             git checkout --detach origin/master
             git branch -d master
@@ -184,7 +184,7 @@ jobs:
               t.add('AzurLaneAutoScript.app')
             EOF
           linux: |
-            cd AzurPilot
+            cd AzurLaneAutoScript
 
             git checkout --detach origin/master
             git branch -d master
@@ -221,7 +221,7 @@ jobs:
               t.add('AzurLaneAutoScript')
             EOF
           windows: |
-            cd AzurPilot
+            cd AzurLaneAutoScript
 
             git checkout --detach origin/master
             git branch -d master
