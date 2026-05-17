@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [[package]]
-naAAA= "alas-launcher"
+name = "alas-launcher"
 version = "1.6.0-test1"
 dependencies = [
  "anyhow",
