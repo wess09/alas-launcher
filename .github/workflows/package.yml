@@ -56,6 +56,25 @@ jobs:
           rm -rf $SP/Crypto/SelfTest
           find $SP/ -name tests -type d | xargs rm -rf
           find $SP/ -name '*.pyi' -type f -delete
+      - name: Download uv binary
+        uses: knicknic/os-specific-run@v1.0.3
+        with:
+          linux: |
+            curl -L -o uv.tar.gz "https://github.com/astral-sh/uv/releases/download/0.7.21/uv-x86_64-unknown-linux-gnu.tar.gz"
+            tar xzf uv.tar.gz
+            mv uv-x86_64-unknown-linux-gnu/uv uv
+            rm -rf uv-x86_64-unknown-linux-gnu uv.tar.gz
+          macos: |
+            curl -L -o uv.tar.gz "https://github.com/astral-sh/uv/releases/download/0.7.21/uv-aarch64-apple-darwin.tar.gz"
+            tar xzf uv.tar.gz
+            mv uv-aarch64-apple-darwin/uv uv
+            rm -rf uv-aarch64-apple-darwin uv.tar.gz
+          windows: |
+            curl -L -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.7.21/uv-x86_64-pc-windows-msvc.zip"
+            mkdir -p uv_extract
+            tar -xvf uv.zip -C uv_extract
+            mv uv_extract/uv.exe uv.exe
+            rm -rf uv_extract uv.zip
       - name: Get git
         uses: knicknic/os-specific-run@v1.0.3
         with:
@@ -135,6 +154,7 @@ jobs:
 
             mkdir -p toolkit/bin
             cp ../platform-tools/adb toolkit/bin/
+            cp ../uv toolkit/bin/
             mkdir -p toolkit/libexec/git-core
             cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
             ln toolkit/libexec/git-core/git toolkit/bin/
@@ -175,6 +195,7 @@ jobs:
 
             mkdir -p toolkit/bin
             cp ../platform-tools/adb toolkit/bin/
+            cp ../uv toolkit/bin/
             mkdir -p toolkit/libexec/git-core
             cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
             ln toolkit/libexec/git-core/git toolkit/bin/
@@ -211,6 +232,7 @@ jobs:
 
             mkdir -ea 0 toolkit
             cp ..\platform-tools\adb.exe, ..\platform-tools\Adb*.dll toolkit\
+            cp ..\uv.exe toolkit\
             mkdir -ea 0 toolkit\git\cmd
             cp ..\git\cmd\git.exe toolkit\git\cmd\
             mkdir -ea 0 toolkit\git\mingw64\bin

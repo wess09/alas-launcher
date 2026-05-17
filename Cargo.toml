@@ -1,6 +1,6 @@
 [package]
 name = "alas-launcher"
-version = "1.5.9"
+version = "1.6.0-test1"
 description = "New ALAS launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
 edition = "2021"

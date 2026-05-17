@@ -49,6 +49,8 @@ const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
 const MENUBAR_ICON_1X: &[u8] = include_bytes!("../icons/menubar.png");
 #[cfg(windows)]
 const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
+const SPLASH_BG_LIGHT: &[u8] = include_bytes!("../bg/l_bg.png");
+const SPLASH_BG_DARK: &[u8] = include_bytes!("../bg/b_bg.png");
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(any(windows, target_os = "android"))]
 const BACKEND_ERROR_URL_BASE: &str = "http://alas-error.localhost/backend";
@@ -170,10 +172,10 @@ fn main() -> Result<()> {
                 let allow_exit = allow_exit_for_setup.clone();
                 let recreating_main_window_for_menu = recreating_main_window_for_setup.clone();
                 let recreating_main_window_for_tray = recreating_main_window_for_setup.clone();
-                let show_item = MenuItemBuilder::new("Show / Hide")
+                let show_item = MenuItemBuilder::new("显示 / 隐藏")
                     .id("toggle_visibility")
                     .build(app)?;
-                let quit_item = MenuItemBuilder::new("Quit")
+                let quit_item = MenuItemBuilder::new("退出")
                     .id("quit")
                     .build(app)?;
                 let tray_menu = MenuBuilder::new(app)
@@ -190,7 +192,7 @@ fn main() -> Result<()> {
                 info!("Building tray icon...");
                 let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
-                    .tooltip("Alas Launcher")
+                    .tooltip("AzurPilot")
                     .menu(&tray_menu);
 
                 // On Windows, show menu on right click
@@ -278,16 +280,16 @@ fn main() -> Result<()> {
                         };
 
                         status_updater(SplashUpdate::loading(
-                            "Starting up",
-                            "The local WebUI is initializing. The window will open automatically when ready.",
+                            "正在启动",
+                            "本地 Web 界面正在初始化，准备就绪后将自动打开窗口。",
                             4,
-                        ));
+                        ).with_subtitle(format!("正在初始化... | Tips:{}", crate::setup::get_tip())));
                         if let Err(e) = setup_alas_repo(&mut status_updater) {
                             error!("{e}");
                             status_updater(SplashUpdate::error(
-                                "Launch failed",
+                                "启动失败",
                                 format!(
-                                    "Unable to prepare ALAS. You can download the launcher log below for the detailed error.\n\n{}",
+                                    "无法准备环境。您可以下载下方的启动器日志以查看详细错误。\n\n{}",
                                     e
                                 ),
                                 last_progress.get().max(8),
@@ -296,18 +298,18 @@ fn main() -> Result<()> {
                         }
                         info!("Starting gui.py on http://127.0.0.1:{}/", port);
                         status_updater(SplashUpdate::loading(
-                            "Starting up",
-                            "The local WebUI is initializing. This usually takes a few seconds. The window will open automatically when ready.",
+                            "正在启动",
+                            "本地 Web 界面正在初始化，这通常需要几秒钟时间。准备就绪后将自动打开窗口。",
                             97,
-                        ));
+                        ).with_subtitle(format!("启动后端服务中... | Tips:{}", crate::setup::get_tip())));
                         let b = match ManagedBackend::new(&webui_config) {
                             Ok(backend) => backend,
                             Err(e) => {
                                 error!("{e}");
                                 status_updater(SplashUpdate::error(
-                                    "Launch failed",
+                                    "启动失败",
                                     format!(
-                                        "Unable to start the local service. Check whether the configured port is already in use.\n\n{}",
+                                        "无法启动本地服务。请检查配置的端口是否已被占用。\n\n{}",
                                         e
                                     ),
                                     last_progress.get().max(97),
@@ -334,10 +336,10 @@ fn main() -> Result<()> {
                             notification_click,
                         );
                         status_updater(SplashUpdate::loading(
-                            "Opening window",
-                            "The main window is ready and will appear now.",
+                            "正在打开窗口",
+                            "主窗口已准备就绪，即将显示。",
                             100,
-                        ));
+                        ).with_subtitle(format!("启动完成！ | Tips:{}", crate::setup::get_tip())));
                         let _ = splash.destroy();
                         debug!("Destroyed splash window after startup");
 
@@ -680,12 +682,14 @@ fn backend_url(port: u16) -> String {
 }
 
 fn splash_response() -> tauri::http::Response<Vec<u8>> {
+    let light_bg_b64 = BASE64_STANDARD.encode(SPLASH_BG_LIGHT);
+    let dark_bg_b64 = BASE64_STANDARD.encode(SPLASH_BG_DARK);
     tauri::http::Response::builder()
         .header(
             tauri::http::header::CONTENT_TYPE,
             "text/html; charset=utf-8",
         )
-        .body(splash_shell_html().into_bytes())
+        .body(splash_shell_html(&light_bg_b64, &dark_bg_b64).into_bytes())
         .unwrap()
 }
 
@@ -804,7 +808,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ALAS 后端连接失败</title>
+<title>AzurPilot 后端连接失败</title>
 <style>
   :root {{
     color-scheme: light;
@@ -949,7 +953,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
   <main class="panel">
     <div class="mark">!</div>
     <h1>后端连接失败</h1>
-    <p class="lead">启动器没有连上本地 ALAS WebUI。后端可能仍在启动、已经退出，或者端口被其他程序占用。</p>
+    <p class="lead">启动器没有连上本地 AzurPilot WebUI。后端可能仍在启动、已经退出，或者端口被其他程序占用。</p>
     <section class="details" aria-label="连接信息">
       <div class="row">
         <div class="label">地址</div>
@@ -1027,13 +1031,20 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     launcherLogButton.addEventListener('click', () => {{
       downloadLog(launcherLogButton, 'download_today_launcher_log', '启动器日志');
     }});
+
+    // 每秒尝试自动刷新（重试连接）
+    setInterval(() => {{
+      if (!retryButton.disabled) {{
+        retryButton.click();
+      }}
+    }}, 1000);
   </script>
 </body>
 </html>"#
     )
 }
 
-fn splash_shell_html() -> String {
+fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
     // Splash window uses native decorations, no custom titlebar needed
     let splash_titlebar = String::new();
     // No custom titlebar script needed for splash (uses native decorations)
@@ -1046,13 +1057,90 @@ fn splash_shell_html() -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {{
-    color-scheme: light;
+    color-scheme: light dark;
     --color-background-primary: rgba(255, 255, 255, 0.9);
     --color-background-secondary: #eef3f8;
     --color-border-tertiary: rgba(196, 206, 219, 0.92);
     --color-text-primary: #1f2a37;
     --color-text-secondary: #617084;
     --border-radius-lg: 20px;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --color-background-primary: rgba(31, 41, 55, 0.9);
+      --color-background-secondary: rgba(255, 255, 255, 0.15);
+      --color-border-tertiary: rgba(255, 255, 255, 0.15);
+      --color-text-primary: #f3f4f6;
+      --color-text-secondary: #9ca3af;
+    }}
+    html, body {{
+      background-color: #111827;
+    }}
+    .badge {{
+      background: rgba(59, 130, 246, 0.15) !important;
+      color: #60a5fa !important;
+      border-color: rgba(59, 130, 246, 0.3) !important;
+    }}
+    .badge-err {{
+      background: rgba(239, 68, 68, 0.15) !important;
+      color: #f87171 !important;
+      border-color: rgba(239, 68, 68, 0.3) !important;
+    }}
+    .prog-pct {{
+      color: #60a5fa !important;
+    }}
+    .prog-fill {{
+      background: #3b82f6 !important;
+    }}
+    .splash-log-button {{
+      background: #1f2937 !important;
+      color: #60a5fa !important;
+      border-color: #4b5563 !important;
+    }}
+    .splash-log-button:hover {{
+      background: #374151 !important;
+    }}
+  }}
+  /* Error state style - Beautiful full red screen */
+  body.error-state {{
+    background: #dc2626 !important;
+  }}
+  .error-state .brand-text strong,
+  .error-state .status-body h2 {{
+    color: #ffffff !important;
+  }}
+  .error-state .brand-text span,
+  .error-state .status-body p,
+  .error-state .prog-meta-main,
+  .error-state .prog-pct {{
+    color: rgba(255, 255, 255, 0.8) !important;
+  }}
+  .error-state .divider {{
+    background: rgba(255, 255, 255, 0.2) !important;
+  }}
+  .error-state .badge-err {{
+    background: #ffe4e6 !important;
+    color: #991b1b !important;
+    border-color: #fca5a5 !important;
+  }}
+  .error-state .prog-track {{
+    background: rgba(255, 255, 255, 0.2) !important;
+  }}
+  .error-state .prog-fill-err {{
+    background: #ff4d4d !important;
+  }}
+  .error-state .err-dot {{
+    background: #ffffff !important;
+    color: #dc2626 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15) !important;
+  }}
+  .error-state .splash-log-button {{
+    background: rgba(255, 255, 255, 0.15) !important;
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.3) !important;
+  }}
+  .error-state .splash-log-button:hover {{
+    background: rgba(255, 255, 255, 0.25) !important;
   }}
   * {{
     box-sizing: border-box;
@@ -1072,28 +1160,12 @@ fn splash_shell_html() -> String {
     padding: 0;
     position: relative;
     isolation: isolate;
+    background: url(data:image/png;base64,{light_bg}) center/cover no-repeat;
   }}
-  body::before {{
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -2;
-    background:
-      linear-gradient(118deg, transparent 0 60%, rgba(24, 95, 165, 0.055) 60% 77%, transparent 77% 100%),
-      linear-gradient(146deg, rgba(226, 75, 74, 0.04) 0 16%, transparent 16% 100%),
-      linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-  }}
-  body::after {{
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background:
-      linear-gradient(90deg, rgba(24, 95, 165, 0.055) 1px, transparent 1px),
-      linear-gradient(0deg, rgba(24, 95, 165, 0.045) 1px, transparent 1px);
-    background-size: 28px 28px;
-    mask-image: linear-gradient(90deg, rgba(0,0,0,0.28), transparent 48%, rgba(0,0,0,0.18));
+  @media (prefers-color-scheme: dark) {{
+    body {{
+      background-image: url(data:image/png;base64,{dark_bg});
+    }}
   }}
 
 
@@ -1105,32 +1177,6 @@ fn splash_shell_html() -> String {
     align-items: center;
     padding-top: 0;
     position: relative;
-  }}
-  .wrap::before,
-  .wrap::after {{
-    content: "";
-    position: absolute;
-    pointer-events: none;
-    z-index: -1;
-  }}
-  .wrap::before {{
-    width: 180px;
-    height: 142px;
-    top: 10px;
-    right: 4px;
-    border: 1px solid rgba(24, 95, 165, 0.12);
-    background: rgba(255,255,255,0.36);
-    transform: skewX(-18deg);
-  }}
-  .wrap::after {{
-    width: 170px;
-    height: 118px;
-    left: -18px;
-    bottom: 4px;
-    border-top: 1px solid rgba(226, 75, 74, 0.12);
-    border-right: 1px solid rgba(226, 75, 74, 0.10);
-    background: rgba(226, 75, 74, 0.026);
-    transform: skewX(-18deg);
   }}
   .card {{
     width: calc(100% - 44px);
@@ -1363,10 +1409,10 @@ fn splash_shell_html() -> String {
     <div class="card">
       <div class="card-header">
         <div class="brand-text">
-          <strong>ALAS Launcher</strong>
+          <strong>AzurPilot</strong>
           <span id="subtitle"></span>
         </div>
-        <div id="badge" class="badge">Loading</div>
+        <div id="badge" class="badge">正在加载</div>
       </div>
       <div class="divider"></div>
       <div class="status-row">
@@ -1382,7 +1428,7 @@ fn splash_shell_html() -> String {
           <div id="progress-fill" class="prog-fill" style="width: 0%;"></div>
         </div>
         <div class="prog-meta">
-          <span id="progress-meta" class="prog-meta-main">The window opens automatically when ready</span>
+          <span id="progress-meta" class="prog-meta-main">准备就绪后将自动打开窗口</span>
           <span id="progress-pct" class="prog-pct">0%</span>
         </div>
         <div id="splash-actions" class="splash-actions">
@@ -1406,15 +1452,16 @@ fn splash_shell_html() -> String {
       document.getElementById('title').textContent = payload.title || '';
       document.getElementById('detail').textContent = payload.detail || '';
       progressMeta.textContent = payload.is_error
-        ? 'Stopped during initialization'
-        : 'The window opens automatically when ready';
+        ? '初始化已停止'
+        : '准备就绪后将自动打开窗口';
 
       const progress = Math.max(0, Math.min(100, Number(payload.progress || 0)));
       progressFill.style.width = progress + '%';
       progressPct.textContent = progress + '%';
 
       if (payload.is_error) {{
-        badge.textContent = 'Error';
+        document.body.classList.add('error-state');
+        badge.textContent = 'ERROR';
         badge.className = 'badge badge-err';
         spinner.style.display = 'none';
         errorDot.style.display = 'flex';
@@ -1422,7 +1469,8 @@ fn splash_shell_html() -> String {
         progressPct.className = 'prog-pct prog-pct-err';
         splashActions.className = 'splash-actions splash-actions-err';
       }} else {{
-        badge.textContent = 'Loading';
+        document.body.classList.remove('error-state');
+        badge.textContent = '正在加载';
         badge.className = 'badge';
         spinner.style.display = 'block';
         errorDot.style.display = 'none';
@@ -1436,7 +1484,7 @@ fn splash_shell_html() -> String {
       const button = document.getElementById('splash-log-button');
       const progressMeta = document.getElementById('progress-meta');
       button.disabled = true;
-      progressMeta.textContent = 'Preparing launcher log...';
+      progressMeta.textContent = '正在准备启动器日志...';
       try {{
         const invoke =
           (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
@@ -1445,9 +1493,9 @@ fn splash_shell_html() -> String {
           throw new Error('Tauri invoke is unavailable');
         }}
         const filename = await invoke('download_today_launcher_log');
-        progressMeta.textContent = 'Save dialog opened: ' + filename;
+        progressMeta.textContent = '已打开保存窗口：' + filename;
       }} catch (error) {{
-        progressMeta.textContent = 'Launcher log download failed: ' + (error && error.message ? error.message : error);
+        progressMeta.textContent = '启动器日志下载失败：' + (error && error.message ? error.message : error);
       }} finally {{
         button.disabled = false;
       }}
@@ -1455,6 +1503,8 @@ fn splash_shell_html() -> String {
   </script>
 </body>
 </html>"#,
+        light_bg = light_bg_b64,
+        dark_bg = dark_bg_b64,
         splash_script = splash_script,
         splash_titlebar = splash_titlebar,
     );

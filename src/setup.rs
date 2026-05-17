@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use chrono::Local;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
@@ -26,7 +27,7 @@ pub struct SplashUpdate {
 impl SplashUpdate {
     pub fn loading(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
-            subtitle: "Connecting to local service...".to_owned(),
+            subtitle: "正在连接本地服务...".to_owned(),
             title: title.into(),
             detail: detail.into(),
             progress: progress.min(100),
@@ -36,7 +37,7 @@ impl SplashUpdate {
 
     pub fn error(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
-            subtitle: "Failed to connect".to_owned(),
+            subtitle: "连接失败".to_owned(),
             title: title.into(),
             detail: detail.into(),
             progress: progress.min(100),
@@ -48,6 +49,33 @@ impl SplashUpdate {
         self.subtitle = subtitle.into();
         self
     }
+}
+
+const TIPS: &[&str] = &[
+    "指挥官，今天也要加油哦！",
+    "听说给舰娘送戒指能变强？",
+    "每日任务记得领，蚊子腿也是肉。",
+    "后宅的食物记得补充，不然舰娘会饿肚子的。",
+    "科研项目虽然慢，但那是变强的必经之路。",
+    "不要忘记每日的免费建造哦（虽然大都是狗粮）。",
+    "AzurPilot 正在努力为你打工，请稍等片刻。",
+    "正在试图潜入塞壬据点...",
+    "正在调配燃油，请指挥官稍后...",
+    "正在说服蛮啾们加快进度...",
+    "适当的休息也是指挥官工作的一部分哦。",
+    "听说点击看板娘会有惊喜？",
+    "维护补偿的魔方和物资已经... 还没发，再等会儿。",
+    "正在拦截塞壬的干扰信号...",
+    "正在分析塞壬的技术矩阵...",
+    "皇家的红茶已经泡好了，指挥官要来一杯吗？",
+    "白鹰的派对已经准备就绪，就等指挥官了。",
+    "重樱的樱花落了，但我们的奋斗才刚开始。",
+    "铁血的科技世界第一！",
+];
+
+pub fn get_tip() -> String {
+    let now = Local::now().timestamp() as usize;
+    TIPS[now % TIPS.len()].to_string()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,18 +124,11 @@ fn prepend_path_to_env(key: &str, path: PathBuf) {
     std::env::set_var(key, std::env::join_paths(paths).unwrap());
 }
 
-fn configure_python_package_installation() {
-    // Some portable Python builds are marked as externally managed (PEP 668),
-    // which blocks `pip install` unless this opt-out is present.
-    std::env::set_var("PIP_BREAK_SYSTEM_PACKAGES", "1");
-}
-
 #[cfg(unix)]
 pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
     info!("ALAS dir is {:?}", &dir);
     set_current_dir(&dir)?;
-    configure_python_package_installation();
     prepend_path_to_env("PATH", dir.join("toolkit").join("libexec").join("git-core"));
     prepend_path_to_env("PATH", dir.join("toolkit").join("bin"));
     prepend_path_to_env("LD_LIBRARY_PATH", dir.join("toolkit").join("lib"));
@@ -119,7 +140,6 @@ pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
     info!("ALAS dir is {:?}", &dir);
     set_current_dir(&dir)?;
-    configure_python_package_installation();
     prepend_path_to_env("PATH", dir.join("toolkit").join("git").join("cmd"));
     prepend_path_to_env("PATH", dir.join("toolkit").join("Scripts"));
     prepend_path_to_env("PATH", dir.join("toolkit"));
@@ -143,39 +163,39 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
     // Similar setup to deploy/installer.py
     status_updater(
         SplashUpdate::loading(
-            "Preparing workspace",
-            "Cleaning cached config state and checking the local ALAS setup.",
+            "准备工作区",
+            "正在清理缓存并检查本地环境。",
             8,
         )
-        .with_subtitle("Checking local environment..."),
+        .with_subtitle(format!("检查本地环境中... | Tips：{}", get_tip())),
     );
     atomic_failure_cleanup("./config")?;
     ensure_python_dependency_config()?;
     status_updater(
         SplashUpdate::loading(
-            "Updating ALAS",
-            "Fetching repository changes and validating the local working copy.",
+            "正在更新",
+            "正在获取最新补丁包",
             18,
         )
-        .with_subtitle("Syncing repository..."),
+        .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
     );
     git_update(&mut status_updater)?;
     status_updater(
         SplashUpdate::loading(
-            "Installing dependencies",
-            "Verifying the Python packages required by ALAS.",
+            "安装依赖库",
+            "正在验证 AzurPilot 运行所需的 Python 依赖包。",
             64,
         )
-        .with_subtitle("Syncing Python packages..."),
+        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
     );
-    pip_install(&mut status_updater)?;
+    uv_pip_install(&mut status_updater)?;
     status_updater(
         SplashUpdate::loading(
-            "Finalizing startup",
-            "The local WebUI is almost ready. Opening the main window next.",
+            "完成启动",
+            "本地界面已准备就绪，即将打开主窗口。",
             94,
         )
-        .with_subtitle("Connecting to local service..."),
+        .with_subtitle(format!("启动服务中... | Tips：{}", get_tip())),
     );
     Ok(())
 }
@@ -227,14 +247,14 @@ fn pipe_lines(read: impl Read + Send + 'static, tx: Sender<(bool, String)>, is_e
     });
 }
 
-fn run_python_script(
-    script: &str,
+fn run_command(
+    cmd: &mut Command,
     mut status_updater: impl FnMut(SplashUpdate),
     phase: ScriptPhase,
 ) -> Result<()> {
-    // Spawn the child with piped stdout/stderr so we can tee them.
-    let mut child = Command::new("python")
-        .args(["-c", script])
+    let is_deps = matches!(phase, ScriptPhase::Dependencies { .. });
+
+    let mut child = cmd
         .create_no_window()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -261,13 +281,19 @@ fn run_python_script(
 
     // Receive lines and tee them to stdout/stderr and the status_updater callback.
     while let Ok((is_err, line)) = rx.recv() {
-        if let Some(update) = splash_update_for_output(&line, phase, &mut seen_packages) {
+        if let Some(update) =
+            splash_update_for_output(&line, phase, &mut seen_packages)
+        {
             status_updater(update);
         }
 
         if is_err {
-            warn!("{line}");
-            last_err = line;
+            if is_deps && is_uv_progress_line(&line) {
+                info!("{line}");
+            } else {
+                warn!("{line}");
+                last_err = line;
+            }
         } else {
             info!("{line}");
         }
@@ -278,8 +304,8 @@ fn run_python_script(
     if !status.success() {
         if last_err.is_empty() {
             last_err = match phase {
-                ScriptPhase::Git => "Failed to update ALAS".to_owned(),
-                ScriptPhase::Dependencies { .. } => "Failed to update dependencies".to_owned(),
+                ScriptPhase::Git => "更新 AzurPilot 失败".to_owned(),
+                ScriptPhase::Dependencies { .. } => "更新依赖库失败".to_owned(),
             };
         }
         return Err(anyhow!(last_err));
@@ -287,13 +313,13 @@ fn run_python_script(
     Ok(())
 }
 
-fn run_python_script_with_retry(
-    script: &str,
+fn run_command_with_retry(
+    build_cmd: impl Fn() -> Command,
     mut status_updater: impl FnMut(SplashUpdate),
     phase: ScriptPhase,
 ) -> Result<()> {
     for retry in 0..=MAX_UPDATE_RETRIES {
-        match run_python_script(script, &mut status_updater, phase) {
+        match run_command(&mut build_cmd(), &mut status_updater, phase) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 if retry == MAX_UPDATE_RETRIES {
@@ -317,21 +343,21 @@ fn run_python_script_with_retry(
 
 fn phase_display_name(phase: ScriptPhase) -> &'static str {
     match phase {
-        ScriptPhase::Git => "Git update",
-        ScriptPhase::Dependencies { .. } => "Dependency update",
+        ScriptPhase::Git => "代码更新",
+        ScriptPhase::Dependencies { .. } => "依赖更新",
     }
 }
 
 fn splash_retry_update(phase: ScriptPhase, retry_count: usize, error_text: &str) -> SplashUpdate {
     let detail = format!(
-        "Attempt failed ({retry_count}/{MAX_UPDATE_RETRIES}), retrying in 1 second: {error_text}"
+        "重试失败 ({retry_count}/{MAX_UPDATE_RETRIES})，1秒后再次尝试：{error_text}"
     );
     match phase {
-        ScriptPhase::Git => SplashUpdate::loading("Updating ALAS", detail, 18)
-            .with_subtitle("Syncing repository..."),
+        ScriptPhase::Git => SplashUpdate::loading("正在更新 AzurPilot", detail, 18)
+            .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
         ScriptPhase::Dependencies { .. } => {
-            SplashUpdate::loading("Installing dependencies", detail, 64)
-                .with_subtitle("Syncing Python packages...")
+            SplashUpdate::loading("安装依赖库", detail, 64)
+                .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip()))
         }
     }
 }
@@ -350,22 +376,63 @@ gm = deploy.git.GitManager()
 gm.execute = decorate_execute(gm.execute)
 gm.git_install()
 "#;
-    run_python_script_with_retry(script, status_updater, ScriptPhase::Git)
+    run_command_with_retry(
+        || {
+            let mut cmd = Command::new("python");
+            cmd.args(["-c", script]);
+            cmd
+        },
+        status_updater,
+        ScriptPhase::Git,
+    )
 }
 
-fn pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
+fn uv_executable() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from("./toolkit/uv.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("./toolkit/bin/uv")
+    }
+}
+
+fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
+    let uv = uv_executable();
+    if !uv.exists() {
+        return Err(anyhow!(
+            "UV 包管理器未找到 ({}). 请重新下载最新版本的 AzurPilot 启动器.",
+            uv.display()
+        ));
+    }
+
     let requirements_file = get_requirements_file_path();
-    let script = r#"
-import deploy.pip
-pm = deploy.pip.PipManager()
-pm.pip_install()
-"#;
-    run_python_script_with_retry(
-        script,
-        status_updater,
-        ScriptPhase::Dependencies {
-            total_packages: count_required_packages(&requirements_file),
+    let total_packages = count_required_packages(&requirements_file);
+
+    let mirror = get_deploy_config()
+        .as_ref()
+        .and_then(|c| c.get("Deploy"))
+        .and_then(|d| d.get("Python"))
+        .and_then(|p| p.get("PypiMirror"))
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty() && *m != "null")
+        .map(|m| m.to_owned());
+
+    run_command_with_retry(
+        || {
+            let mut cmd = Command::new(&uv);
+            cmd.arg("pip")
+                .arg("install")
+                .arg("-r")
+                .arg(&requirements_file);
+            if let Some(ref m) = mirror {
+                cmd.args(["--index-url", m]);
+            }
+            cmd
         },
+        status_updater,
+        ScriptPhase::Dependencies { total_packages },
     )
 }
 
@@ -443,8 +510,8 @@ fn splash_update_for_git_output(line: &str) -> Option<SplashUpdate> {
     if line.contains("=====") {
         let detail = line.replace('=', " ");
         return Some(
-            SplashUpdate::loading("Updating ALAS", detail.trim(), 24)
-                .with_subtitle("Syncing repository..."),
+            SplashUpdate::loading("正在更新 AzurPilot", detail.trim(), 24)
+                .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
         );
     }
 
@@ -452,8 +519,8 @@ fn splash_update_for_git_output(line: &str) -> Option<SplashUpdate> {
         let percentage = find_percentage(line).unwrap_or(0);
         let progress = 18 + ((percentage as u16 * 42) / 100) as u8;
         return Some(
-            SplashUpdate::loading("Updating ALAS", line, progress)
-                .with_subtitle("Syncing repository..."),
+            SplashUpdate::loading("正在更新 AzurPilot", line, progress)
+                .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
         );
     }
 
@@ -465,71 +532,76 @@ fn splash_update_for_dependency_output(
     total_packages: usize,
     seen_packages: &mut HashSet<String>,
 ) -> Option<SplashUpdate> {
-    if line.contains("=====") {
-        let detail = line.replace('=', " ");
-        let lowered = detail.to_ascii_lowercase();
-        let (title, progress) = if lowered.contains("check python") {
-            ("Checking Python runtime", 66)
-        } else if lowered.contains("update dependencies") {
-            ("Installing dependencies", 72)
-        } else {
-            ("Installing dependencies", 70)
-        };
-        return Some(
-            SplashUpdate::loading(title, detail.trim(), progress)
-                .with_subtitle("Syncing Python packages..."),
-        );
+    let subtitle = format!("同步依赖包中... | Tips：{}", get_tip());
+
+    // UV: resolution complete
+    if line.starts_with("Resolved ") {
+        return Some(SplashUpdate::loading("安装依赖库", line, 70).with_subtitle(subtitle));
     }
 
-    if let Some(package_name) = extract_dependency_name(line) {
-        seen_packages.insert(package_name);
-        let progress = dependency_progress(seen_packages.len(), total_packages);
-        return Some(
-            SplashUpdate::loading("Installing dependencies", line, progress)
-                .with_subtitle("Syncing Python packages..."),
-        );
+    // UV: downloading a package
+    if line.starts_with("Downloading ") {
+        if let Some(pkg) = extract_uv_package_name(line) {
+            seen_packages.insert(pkg);
+        }
+        let progress = uv_download_progress(seen_packages.len(), total_packages);
+        return Some(SplashUpdate::loading("安装依赖库", line, progress).with_subtitle(subtitle));
     }
 
-    if line.starts_with("Installing collected packages") {
-        return Some(
-            SplashUpdate::loading(
-                "Installing dependencies",
-                "Applying downloaded package updates to the local Python toolkit.",
-                92,
-            )
-            .with_subtitle("Syncing Python packages..."),
-        );
+    // UV: preparation complete
+    if line.starts_with("Prepared ") {
+        return Some(SplashUpdate::loading("安装依赖库", line, 84).with_subtitle(subtitle));
+    }
+
+    // UV: install phase complete
+    if line.starts_with("Installed ") {
+        return Some(SplashUpdate::loading("安装依赖库", line, 88).with_subtitle(subtitle));
+    }
+
+    // UV: per-package install confirmation (+ pkg==version) from stdout
+    if line.starts_with("+ ") {
+        return Some(SplashUpdate::loading("安装依赖库", line, 90).with_subtitle(subtitle));
+    }
+
+    // UV: everything already up to date
+    if line.starts_with("Audited ") {
+        return Some(SplashUpdate::loading("安装依赖库", line, 90).with_subtitle(subtitle));
     }
 
     None
 }
 
-fn dependency_progress(processed_packages: usize, total_packages: usize) -> u8 {
-    if total_packages == 0 {
-        return 78;
-    }
-
-    let clamped = processed_packages.min(total_packages) as u16;
-    let total = total_packages as u16;
-    let span = 24u16;
-    (64 + ((clamped * span) / total) as u8).min(90)
+fn is_uv_progress_line(line: &str) -> bool {
+    line.starts_with("Resolved ")
+        || line.starts_with("Downloading ")
+        || line.starts_with("Downloaded ")
+        || line.starts_with("Prepared ")
+        || line.starts_with("Installed ")
+        || line.starts_with("Audited ")
+        || line.starts_with("warning: ")
 }
 
-fn extract_dependency_name(line: &str) -> Option<String> {
-    let prefixes = ["Collecting ", "Requirement already satisfied: "];
-    let prefix = prefixes.iter().find(|prefix| line.starts_with(**prefix))?;
-    let rest = line.strip_prefix(prefix)?;
-    let end = rest
-        .find("==")
-        .or_else(|| rest.find(" ("))
-        .or_else(|| rest.find(" in "))
-        .unwrap_or(rest.len());
-    let package = rest[..end].trim();
-    if package.is_empty() {
-        None
-    } else {
-        Some(package.to_ascii_lowercase())
+fn extract_uv_package_name(line: &str) -> Option<String> {
+    // "Downloading numpy==2.4.3 (8.2 MiB)" or "Downloading numpy (8.2 MiB)" or "Downloading numpy @ https://..."
+    let rest = line.strip_prefix("Downloading ")?;
+    let name = rest
+        .split_once("==")
+        .map(|(n, _)| n)
+        .or_else(|| rest.split_once(" @ ").map(|(n, _)| n))
+        .or_else(|| rest.split_once(" (").map(|(n, _)| n))
+        .unwrap_or(rest);
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn uv_download_progress(downloaded: usize, total: usize) -> u8 {
+    if total == 0 {
+        return 77;
     }
+    let clamped = downloaded.min(total) as u16;
+    let total = total as u16;
+    // 72-82% range for downloads
+    (72 + ((clamped * 10) / total) as u8).min(82)
 }
 
 fn count_required_packages(path: &str) -> usize {
