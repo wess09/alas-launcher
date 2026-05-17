@@ -387,31 +387,11 @@ gm.git_install()
     )
 }
 
-fn uv_executable() -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from("./toolkit/uv.exe")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("./toolkit/bin/uv")
-    }
-}
-
 fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
-    let uv = uv_executable();
-    if !uv.exists() {
-        return Err(anyhow!(
-            "UV 包管理器未找到 ({}). 请重新下载最新版本的 AzurPilot 启动器.",
-            uv.display()
-        ));
-    }
-
     let requirements_file = get_requirements_file_path();
     let total_packages = count_required_packages(&requirements_file);
 
-    let config = get_deploy_config();
-    let mirror = config
+    let mirror = get_deploy_config()
         .as_ref()
         .and_then(|c| c.get("Deploy"))
         .and_then(|d| d.get("Python"))
@@ -420,28 +400,10 @@ fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
         .filter(|m| !m.is_empty() && *m != "null")
         .map(|m| m.to_owned());
 
-    let python = config
-        .as_ref()
-        .and_then(|c| c.get("Deploy"))
-        .and_then(|d| d.get("Python"))
-        .and_then(|p| p.get("PythonExecutable"))
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_owned())
-        .unwrap_or_else(|| {
-            #[cfg(windows)]
-            { "./toolkit/python.exe".to_owned() }
-            #[cfg(not(windows))]
-            { "./toolkit/bin/python".to_owned() }
-        });
-
     run_command_with_retry(
         move || {
-            let mut cmd = Command::new(&uv);
-            cmd.arg("pip")
-                .arg("install")
-                .arg("--python")
-                .arg(&python)
-                .arg("--system")
+            let mut cmd = Command::new("python");
+            cmd.args(["-m", "uv", "pip", "install"])
                 .arg("-r")
                 .arg(&requirements_file);
             if let Some(ref m) = mirror {
