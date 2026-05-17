@@ -405,7 +405,9 @@ fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
             let mut cmd = Command::new("python");
             cmd.args(["-m", "uv", "pip", "install"])
                 .arg("-r")
-                .arg(&requirements_file);
+                .arg(&requirements_file)
+                .env("UV_SYSTEM_PYTHON", "1")
+                .env("UV_NO_PROGRESS", "1");
             if let Some(ref m) = mirror {
                 cmd.args(["--index-url", m]);
             }
@@ -559,6 +561,7 @@ fn is_uv_progress_line(line: &str) -> bool {
         || line.starts_with("Installed ")
         || line.starts_with("Audited ")
         || line.starts_with("warning: ")
+        || line.starts_with("hint: ")
 }
 
 fn extract_uv_package_name(line: &str) -> Option<String> {
