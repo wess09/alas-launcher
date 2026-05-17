@@ -441,6 +441,7 @@ fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
                 .arg("install")
                 .arg("--python")
                 .arg(&python)
+                .arg("--system")
                 .arg("-r")
                 .arg(&requirements_file);
             if let Some(ref m) = mirror {
