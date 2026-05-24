@@ -127,21 +127,23 @@ jobs:
         with:
           macos: |
             set -eux
-            cd AzurLaneAutoScript
-            rm -rf .git
+            rm -rf package-root AzurLaneAutoScript.app
+            mkdir -p package-root/AzurLaneAutoScript
+            ditto AzurLaneAutoScript/deploy package-root/AzurLaneAutoScript/deploy
+
+            cd package-root/AzurLaneAutoScript
             mkdir -p config .venv/bin bootstrap
-            cp ../deploy.mac.yaml config/deploy.yaml
+            cp ../../deploy.mac.yaml config/deploy.yaml
             export UV_PYTHON_INSTALL_DIR="$PWD/.venv/python"
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
             uv pip install --python .venv/bin/python requests
-            cp ../bootstrap/uv .venv/bin/uv
-            cp ../platform-tools/adb .venv/bin/adb
+            cp ../../bootstrap/uv .venv/bin/uv
+            cp ../../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
-            cp -R ../git/dist/libexec/git-core .venv/libexec/
-            cp ../git/dist/bin/git .venv/bin/git
-            cp .venv/bin/uv bootstrap/uv
+            cp -R ../../git/dist/libexec/git-core .venv/libexec/
+            cp ../../git/dist/bin/git .venv/bin/git
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
             cp .venv/bin/git bootstrap/git
@@ -156,7 +158,7 @@ jobs:
             cp target/release/alas-launcher AzurLaneAutoScript.app/Contents/MacOS/
             mkdir -p AzurLaneAutoScript.app/Contents/Resources
             cp icons/icon.icns AzurLaneAutoScript.app/Contents/Resources/
-            ditto AzurLaneAutoScript AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
+            ditto package-root/AzurLaneAutoScript AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
             cp Info.plist AzurLaneAutoScript.app/Contents/
             rdfind -minsize 128 -makehardlinks true AzurLaneAutoScript.app
             uv run python - <<EOF
@@ -173,70 +175,74 @@ jobs:
             EOF
           linux: |
             set -eux
-            cd AzurLaneAutoScript
-            rm -rf .git
+            rm -rf package-root
+            mkdir -p package-root/AzurLaneAutoScript
+            cp -a AzurLaneAutoScript/deploy package-root/AzurLaneAutoScript/deploy
+
+            cd package-root/AzurLaneAutoScript
             mkdir -p config .venv/bin bootstrap
-            cp ../deploy.unix.yaml config/deploy.yaml
+            cp ../../deploy.unix.yaml config/deploy.yaml
             export UV_PYTHON_INSTALL_DIR="$PWD/.venv/python"
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
             uv pip install --python .venv/bin/python requests
-            cp ../bootstrap/uv .venv/bin/uv
-            cp ../platform-tools/adb .venv/bin/adb
+            cp ../../bootstrap/uv .venv/bin/uv
+            cp ../../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
-            cp -R ../git/dist/libexec/git-core .venv/libexec/
-            cp ../git/dist/bin/git .venv/bin/git
-            cp .venv/bin/uv bootstrap/uv
+            cp -R ../../git/dist/libexec/git-core .venv/libexec/
+            cp ../../git/dist/bin/git .venv/bin/git
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
             cp .venv/bin/git bootstrap/git
             chmod +x .venv/bin/uv .venv/bin/adb .venv/bin/git
-            cp ../target/release/alas-launcher alas-launcher
+            cp ../../target/release/alas-launcher alas-launcher
             .venv/bin/python -c 'import sys; print(sys.version)'
             .venv/bin/uv --version
             .venv/bin/adb version
             .venv/bin/git --version
 
             cd ${{ github.workspace }}
-            rdfind -minsize 128 -makehardlinks true AzurLaneAutoScript
+            rdfind -minsize 128 -makehardlinks true package-root/AzurLaneAutoScript
             uv run python - <<EOF
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript')
+              t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             EOF
 
-            cp deploy.unix-cn.yaml AzurLaneAutoScript/config/deploy.yaml
+            cp deploy.unix-cn.yaml package-root/AzurLaneAutoScript/config/deploy.yaml
             uv run python - <<EOF
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript')
+              t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             EOF
           windows: |
-            cd AzurLaneAutoScript
-            rm -r -fo .git
+            rm -r -fo package-root -ErrorAction SilentlyContinue
+            mkdir -ea 0 package-root\AzurLaneAutoScript
+            cp -r AzurLaneAutoScript\deploy package-root\AzurLaneAutoScript\deploy
+
+            cd package-root\AzurLaneAutoScript
             mkdir -ea 0 config
             mkdir -ea 0 bootstrap
-            cp ..\deploy.windows.yaml config\deploy.yaml
+            cp ..\..\deploy.windows.yaml config\deploy.yaml
             $env:UV_PYTHON_INSTALL_DIR = "$PWD\.venv\python"
             uv python install --install-dir .venv\python --no-bin --managed-python 3.14.3
             $python_home = Get-ChildItem .venv\python -Directory | Where-Object { $_.Name -like "cpython-3.14.3-*" } | Select-Object -First 1
             uv venv --allow-existing --relocatable --python "$($python_home.FullName)\python.exe" .venv
             uv pip install --python .venv\Scripts\python.exe requests
-            cp ..\bootstrap\uv.exe .venv\Scripts\uv.exe
-            cp ..\platform-tools\adb.exe .venv\Scripts\adb.exe
-            cp ..\platform-tools\Adb*.dll .venv\Scripts\
+            cp ..\..\bootstrap\uv.exe .venv\Scripts\uv.exe
+            cp ..\..\platform-tools\adb.exe .venv\Scripts\adb.exe
+            cp ..\..\platform-tools\Adb*.dll .venv\Scripts\
             mkdir -ea 0 .venv\Scripts\git\cmd
-            cp ..\git\cmd\git.exe .venv\Scripts\git\cmd\
+            cp ..\..\git\cmd\git.exe .venv\Scripts\git\cmd\
             mkdir -ea 0 .venv\Scripts\git\mingw64\bin
-            $git_files = @("git.exe","git-remote-http.exe","git-remote-https.exe","libcurl-4.dll") | ForEach-Object { "..\git\mingw64\bin\" + $_ }
-            ..\pedeps\bin\copypedeps.exe -r $git_files .venv\Scripts\git\mingw64\bin\
-            cp .venv\Scripts\uv.exe bootstrap\uv.exe
+            $git_files = @("git.exe","git-remote-http.exe","git-remote-https.exe","libcurl-4.dll") | ForEach-Object { "..\..\git\mingw64\bin\" + $_ }
+            ..\..\pedeps\bin\copypedeps.exe -r $git_files .venv\Scripts\git\mingw64\bin\
             cp .venv\Scripts\adb.exe bootstrap\adb.exe
             cp .venv\Scripts\Adb*.dll bootstrap\
             mkdir -ea 0 bootstrap\git
             cp -r .venv\Scripts\git\* bootstrap\git\
-            cp ..\target\release\alas-launcher.exe alas-launcher.exe
+            cp ..\..\target\release\alas-launcher.exe alas-launcher.exe
             .venv\Scripts\python.exe -c "import sys; print(sys.version)"
             .venv\Scripts\uv.exe --version
             .venv\Scripts\adb.exe version
@@ -246,14 +252,14 @@ jobs:
             uv run python -c @"
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-${{ runner.os }}-$($env:PROCESSOR_ARCHITECTURE.ToLower()).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript')
+              t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             "@
 
-            cp deploy.windows-cn.yaml AzurLaneAutoScript\config\deploy.yaml
+            cp deploy.windows-cn.yaml package-root\AzurLaneAutoScript\config\deploy.yaml
             uv run python -c @"
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$($env:PROCESSOR_ARCHITECTURE.ToLower()).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript')
+              t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             "@
       - name: Prepare launcher updater payload
         uses: knicknic/os-specific-run@v1.0.3

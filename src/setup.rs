@@ -89,6 +89,45 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 const PYTHON_VERSION: &str = "3.14.3";
 const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
+fn default_deploy_config() -> &'static str {
+    #[cfg(windows)]
+    {
+        include_str!("../deploy.windows.yaml")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        include_str!("../deploy.mac.yaml")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        include_str!("../deploy.unix.yaml")
+    }
+}
+
+fn platform_python_config_path() -> &'static str {
+    if cfg!(windows) {
+        "./.venv/Scripts/python.exe"
+    } else {
+        "./.venv/bin/python"
+    }
+}
+
+fn platform_adb_config_path() -> &'static str {
+    if cfg!(windows) {
+        "./.venv/Scripts/adb.exe"
+    } else {
+        "./.venv/bin/adb"
+    }
+}
+
+fn platform_git_config_path() -> &'static str {
+    if cfg!(windows) {
+        "./.venv/Scripts/git/cmd/git.exe"
+    } else {
+        "./.venv/bin/git"
+    }
+}
+
 fn alas_repo_dir() -> PathBuf {
     // Always check if this is a typical same-folder portable distribution
     let exe_folder = std::env::current_exe()
@@ -491,11 +530,22 @@ fn uv_sync_project(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path
 
 fn migrate_dependency_config() -> Result<()> {
     let path = "./config/deploy.yaml";
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(());
-    };
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
 
     let mut changed = false;
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let content = if content.trim().is_empty() {
+        changed = true;
+        default_deploy_config().to_owned()
+    } else {
+        content
+    };
+
+    let mut found_python_executable = false;
+    let mut found_adb_executable = false;
+    let mut found_git_executable = false;
     let mut found_install_dependencies = false;
     let mut output = String::with_capacity(content.len());
 
@@ -507,19 +557,22 @@ fn migrate_dependency_config() -> Result<()> {
             changed = true;
             continue;
         } else if trimmed.starts_with("PythonExecutable:") {
+            found_python_executable = true;
             output.push_str(indent);
             output.push_str("PythonExecutable: ");
-            output.push_str(if cfg!(windows) { "./.venv/Scripts/python.exe" } else { "./.venv/bin/python" });
+            output.push_str(platform_python_config_path());
             changed = true;
         } else if trimmed.starts_with("AdbExecutable:") {
+            found_adb_executable = true;
             output.push_str(indent);
             output.push_str("AdbExecutable: ");
-            output.push_str(if cfg!(windows) { "./.venv/Scripts/adb.exe" } else { "./.venv/bin/adb" });
+            output.push_str(platform_adb_config_path());
             changed = true;
         } else if trimmed.starts_with("GitExecutable:") {
+            found_git_executable = true;
             output.push_str(indent);
             output.push_str("GitExecutable: ");
-            output.push_str(if cfg!(windows) { "./.venv/Scripts/git/cmd/git.exe" } else { "./.venv/bin/git" });
+            output.push_str(platform_git_config_path());
             changed = true;
         } else if trimmed.starts_with("InstallDependencies:") {
             found_install_dependencies = true;
@@ -536,13 +589,32 @@ fn migrate_dependency_config() -> Result<()> {
         output.push('\n');
     }
 
+    if !found_git_executable {
+        output.push_str("\nGitExecutable: ");
+        output.push_str(platform_git_config_path());
+        output.push('\n');
+        changed = true;
+    }
+    if !found_python_executable {
+        output.push_str("PythonExecutable: ");
+        output.push_str(platform_python_config_path());
+        output.push('\n');
+        changed = true;
+    }
+    if !found_adb_executable {
+        output.push_str("AdbExecutable: ");
+        output.push_str(platform_adb_config_path());
+        output.push('\n');
+        changed = true;
+    }
+    if !found_install_dependencies {
+        output.push_str("InstallDependencies: true\n");
+        changed = true;
+    }
+
     if changed {
         fs::write(path, output)?;
         info!("Updated self-contained .venv settings in {path}");
-    } else {
-        if !found_install_dependencies {
-            warn!("InstallDependencies not found in {path}");
-        }
     }
 
     Ok(())
