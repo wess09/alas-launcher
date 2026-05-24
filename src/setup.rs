@@ -247,15 +247,6 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
     migrate_dependency_config()?;
     status_updater(
         SplashUpdate::loading(
-            "安装依赖库",
-            "正在准备 AzurPilot 运行所需的 Python 依赖包。",
-            12,
-        )
-        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
-    );
-    uv_sync_project(&mut status_updater, &bootstrap_uv)?;
-    status_updater(
-        SplashUpdate::loading(
             "正在更新",
             "正在获取最新补丁包",
             18,

@@ -119,7 +119,9 @@ jobs:
             curl -L -o adb.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
             tar -xvf adb.zip
       - name: Get ALAS
-        run: git clone https://github.com/wess09/AzurPilot.git AzurLaneAutoScript --depth=1
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/wess09/AzurPilot.git AzurLaneAutoScript
+          git -C AzurLaneAutoScript sparse-checkout set deploy
       - name: Distribute
         uses: knicknic/os-specific-run@v1.0.3
         with:
