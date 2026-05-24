@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Local;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::env::set_current_dir;
 use std::fs;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -86,6 +86,8 @@ enum ScriptPhase {
 
 const MAX_UPDATE_RETRIES: usize = 20;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+const PYTHON_VERSION: &str = "3.14.3";
+const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
 fn alas_repo_dir() -> PathBuf {
     // Always check if this is a typical same-folder portable distribution
@@ -124,25 +126,95 @@ fn prepend_path_to_env(key: &str, path: PathBuf) {
     std::env::set_var(key, std::env::join_paths(paths).unwrap());
 }
 
-#[cfg(unix)]
-pub fn setup_environment() -> Result<()> {
-    let dir = alas_repo_dir();
-    info!("ALAS dir is {:?}", &dir);
-    set_current_dir(&dir)?;
-    prepend_path_to_env("PATH", dir.join("toolkit").join("libexec").join("git-core"));
-    prepend_path_to_env("PATH", dir.join("toolkit").join("bin"));
-    prepend_path_to_env("LD_LIBRARY_PATH", dir.join("toolkit").join("lib"));
-    Ok(())
+fn venv_dir() -> PathBuf {
+    alas_repo_dir().join(".venv")
 }
 
-#[cfg(windows)]
+fn venv_bin_dir() -> PathBuf {
+    let venv = venv_dir();
+    if cfg!(windows) {
+        venv.join("Scripts")
+    } else {
+        venv.join("bin")
+    }
+}
+
+pub fn venv_python() -> PathBuf {
+    venv_bin_dir().join(if cfg!(windows) { "python.exe" } else { "python" })
+}
+
+fn venv_python_install_dir() -> PathBuf {
+    venv_dir().join("python")
+}
+
+fn venv_uv() -> PathBuf {
+    venv_bin_dir().join(if cfg!(windows) { "uv.exe" } else { "uv" })
+}
+
+fn venv_adb() -> PathBuf {
+    venv_bin_dir().join(if cfg!(windows) { "adb.exe" } else { "adb" })
+}
+
+fn venv_git() -> PathBuf {
+    if cfg!(windows) {
+        venv_bin_dir().join("git").join("cmd").join("git.exe")
+    } else {
+        venv_bin_dir().join("git")
+    }
+}
+
+fn bootstrap_uv_path() -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("azurpilot-bootstrap-{}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(if cfg!(windows) { "uv.exe" } else { "uv" });
+    if !path.exists() {
+        if BOOTSTRAP_UV.is_empty() {
+            if let Some(path_uv) = std::env::var_os("UV").map(PathBuf::from) {
+                return Ok(path_uv);
+            }
+            if let Some(path_uv) = find_on_path("uv") {
+                return Ok(path_uv);
+            }
+            bail!("启动器未内置 uv，且系统 PATH 中找不到 uv");
+        }
+        fs::write(&path, BOOTSTRAP_UV)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions)?;
+        }
+    }
+    Ok(path)
+}
+
+fn find_on_path(executable: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(executable);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{executable}.exe"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
     info!("ALAS dir is {:?}", &dir);
     set_current_dir(&dir)?;
-    prepend_path_to_env("PATH", dir.join("toolkit").join("git").join("cmd"));
-    prepend_path_to_env("PATH", dir.join("toolkit").join("Scripts"));
-    prepend_path_to_env("PATH", dir.join("toolkit"));
+    prepend_path_to_env("PATH", venv_bin_dir());
+    if cfg!(windows) {
+        prepend_path_to_env("PATH", venv_bin_dir().join("git").join("cmd"));
+    }
     Ok(())
 }
 
@@ -169,8 +241,19 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
         )
         .with_subtitle(format!("检查本地环境中... | Tips：{}", get_tip())),
     );
+    let bootstrap_uv = bootstrap_uv_path()?;
+    ensure_runtime_tools(&bootstrap_uv)?;
     atomic_failure_cleanup("./config")?;
-    ensure_python_dependency_config()?;
+    migrate_dependency_config()?;
+    status_updater(
+        SplashUpdate::loading(
+            "安装依赖库",
+            "正在准备 AzurPilot 运行所需的 Python 依赖包。",
+            12,
+        )
+        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
+    );
+    uv_sync_project(&mut status_updater, &bootstrap_uv)?;
     status_updater(
         SplashUpdate::loading(
             "正在更新",
@@ -179,7 +262,7 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
         )
         .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
     );
-    git_update(&mut status_updater)?;
+    git_update(&mut status_updater, &bootstrap_uv)?;
     status_updater(
         SplashUpdate::loading(
             "安装依赖库",
@@ -188,7 +271,7 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
         )
         .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
     );
-    uv_pip_install(&mut status_updater)?;
+    uv_sync_project(&mut status_updater, &bootstrap_uv)?;
     status_updater(
         SplashUpdate::loading(
             "完成启动",
@@ -362,7 +445,7 @@ fn splash_retry_update(phase: ScriptPhase, retry_count: usize, error_text: &str)
     }
 }
 
-fn git_update(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
+fn git_update(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path) -> Result<()> {
     // Decorate execute() to get fetch progress
     let script = r#"
 import deploy.git
@@ -376,10 +459,13 @@ gm = deploy.git.GitManager()
 gm.execute = decorate_execute(gm.execute)
 gm.git_install()
 "#;
+    let python = venv_python();
+    let bootstrap_uv = bootstrap_uv.to_path_buf();
     run_command_with_retry(
         || {
-            let mut cmd = Command::new("python");
-            cmd.args(["-c", script]);
+            let mut cmd = Command::new(&python);
+            cmd.args(["-c", script])
+                .env("AZURPILOT_BOOTSTRAP_UV", &bootstrap_uv);
             cmd
         },
         status_updater,
@@ -387,10 +473,7 @@ gm.git_install()
     )
 }
 
-fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
-    let requirements_file = get_requirements_file_path();
-    let total_packages = count_required_packages(&requirements_file);
-
+fn uv_sync_project(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path) -> Result<()> {
     let mirror = get_deploy_config()
         .as_ref()
         .and_then(|c| c.get("Deploy"))
@@ -400,26 +483,29 @@ fn uv_pip_install(status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
         .filter(|m| !m.is_empty() && *m != "null")
         .map(|m| m.to_owned());
 
+    let bootstrap_uv = bootstrap_uv.to_path_buf();
     run_command_with_retry(
         move || {
-            let mut cmd = Command::new("python");
-            cmd.args(["-m", "uv", "pip", "install"])
-                .arg("--break-system-packages")
-                .arg("-r")
-                .arg(&requirements_file)
-                .env("UV_SYSTEM_PYTHON", "1")
-                .env("UV_NO_PROGRESS", "1");
+            let mut cmd = Command::new(&bootstrap_uv);
+            cmd.args([
+                "sync",
+                "--frozen",
+                "--no-dev",
+                "--no-install-project",
+            ])
+                .env("UV_NO_PROGRESS", "1")
+                .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
             if let Some(ref m) = mirror {
-                cmd.args(["--index-url", m]);
+                cmd.args(["--default-index", m]);
             }
             cmd
         },
         status_updater,
-        ScriptPhase::Dependencies { total_packages },
+        ScriptPhase::Dependencies { total_packages: 0 },
     )
 }
 
-fn ensure_python_dependency_config() -> Result<()> {
+fn migrate_dependency_config() -> Result<()> {
     let path = "./config/deploy.yaml";
     let Ok(content) = fs::read_to_string(path) else {
         return Ok(());
@@ -432,7 +518,26 @@ fn ensure_python_dependency_config() -> Result<()> {
     for line in content.lines() {
         let indent_len = line.len() - line.trim_start().len();
         let indent = &line[..indent_len];
-        if line.trim_start().starts_with("InstallDependencies:") {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("RequirementsFile:") {
+            changed = true;
+            continue;
+        } else if trimmed.starts_with("PythonExecutable:") {
+            output.push_str(indent);
+            output.push_str("PythonExecutable: ");
+            output.push_str(if cfg!(windows) { "./.venv/Scripts/python.exe" } else { "./.venv/bin/python" });
+            changed = true;
+        } else if trimmed.starts_with("AdbExecutable:") {
+            output.push_str(indent);
+            output.push_str("AdbExecutable: ");
+            output.push_str(if cfg!(windows) { "./.venv/Scripts/adb.exe" } else { "./.venv/bin/adb" });
+            changed = true;
+        } else if trimmed.starts_with("GitExecutable:") {
+            output.push_str(indent);
+            output.push_str("GitExecutable: ");
+            output.push_str(if cfg!(windows) { "./.venv/Scripts/git/cmd/git.exe" } else { "./.venv/bin/git" });
+            changed = true;
+        } else if trimmed.starts_with("InstallDependencies:") {
             found_install_dependencies = true;
             if line.trim() != "InstallDependencies: true" {
                 output.push_str(indent);
@@ -449,7 +554,7 @@ fn ensure_python_dependency_config() -> Result<()> {
 
     if changed {
         fs::write(path, output)?;
-        info!("Updated Deploy.Python dependency settings in {path}");
+        info!("Updated self-contained .venv settings in {path}");
     } else {
         if !found_install_dependencies {
             warn!("InstallDependencies not found in {path}");
@@ -460,7 +565,7 @@ fn ensure_python_dependency_config() -> Result<()> {
 }
 
 fn atomic_failure_cleanup(path: &str) -> Result<()> {
-    let _ = Command::new("python")
+    let _ = Command::new(venv_python())
         .args([
             "-c",
             "import sys; from deploy.atomic import atomic_failure_cleanup; atomic_failure_cleanup(sys.argv[1])",
@@ -468,6 +573,190 @@ fn atomic_failure_cleanup(path: &str) -> Result<()> {
         ])
         .create_no_window()
         .status()?;
+    Ok(())
+}
+
+fn ensure_runtime_tools(bootstrap_uv: &Path) -> Result<()> {
+    ensure_self_contained_python(bootstrap_uv)?;
+
+    copy_file_if_exists(bootstrap_uv, &venv_uv())?;
+    ensure_adb_in_venv()?;
+    ensure_git_in_venv()?;
+    Ok(())
+}
+
+fn uv_python_env(cmd: &mut Command) {
+    cmd.env("UV_NO_PROGRESS", "1")
+        .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+}
+
+fn ensure_self_contained_python(bootstrap_uv: &Path) -> Result<()> {
+    if venv_python_works() && managed_python_executable().is_some() {
+        return Ok(());
+    }
+
+    if managed_python_executable().is_none() {
+        let mut cmd = Command::new(bootstrap_uv);
+        cmd.args([
+            "python",
+            "install",
+            "--install-dir",
+        ])
+            .arg(venv_python_install_dir())
+            .args(["--no-bin", "--managed-python", PYTHON_VERSION]);
+        uv_python_env(&mut cmd);
+        let status = cmd.create_no_window().status()?;
+        if !status.success() {
+            bail!("下载 Python {PYTHON_VERSION} 失败");
+        }
+    }
+
+    let managed_python = managed_python_executable()
+        .ok_or_else(|| anyhow!("找不到 .venv 内的 Python {PYTHON_VERSION}"))?;
+    let mut cmd = Command::new(bootstrap_uv);
+    cmd.args(["venv", "--allow-existing", "--relocatable", "--python"])
+        .arg(managed_python)
+        .arg(venv_dir());
+    uv_python_env(&mut cmd);
+    let status = cmd.create_no_window().status()?;
+    if !status.success() {
+        bail!("创建 .venv 失败");
+    }
+    Ok(())
+}
+
+fn managed_python_executable() -> Option<PathBuf> {
+    let install_dir = venv_python_install_dir();
+    let entries = fs::read_dir(install_dir).ok()?;
+    let prefix = format!("cpython-{PYTHON_VERSION}-");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let candidates = if cfg!(windows) {
+            vec![path.join("python.exe")]
+        } else {
+            vec![path.join("bin").join("python3.14"), path.join("bin").join("python")]
+        };
+        for candidate in candidates {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn venv_python_works() -> bool {
+    let python = venv_python();
+    if !python.exists() {
+        return false;
+    }
+    Command::new(python)
+        .args([
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)",
+        ])
+        .create_no_window()
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn copy_file_if_exists(from: &Path, to: &Path) -> Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(from, to)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(to)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(to, permissions)?;
+    }
+    Ok(())
+}
+
+fn ensure_adb_in_venv() -> Result<()> {
+    if venv_adb().exists() {
+        return Ok(());
+    }
+    if cfg!(windows) {
+        copy_first_packaged_tool(&["adb.exe"], &venv_bin_dir())?;
+        copy_matching_packaged_tools("Adb", "dll", &venv_bin_dir())?;
+    } else {
+        copy_first_packaged_tool(&["adb"], &venv_bin_dir())?;
+    }
+    Ok(())
+}
+
+fn ensure_git_in_venv() -> Result<()> {
+    if venv_git().exists() {
+        return Ok(());
+    }
+    if cfg!(windows) {
+        let src = PathBuf::from("bootstrap").join("git");
+        let dst = venv_bin_dir().join("git");
+        if src.exists() {
+            copy_dir_all(&src, &dst)?;
+        }
+    } else {
+        copy_first_packaged_tool(&["git"], &venv_bin_dir())?;
+        let src = PathBuf::from("bootstrap").join("git-core");
+        let dst = venv_dir().join("libexec").join("git-core");
+        if src.exists() {
+            copy_dir_all(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_first_packaged_tool(names: &[&str], target_dir: &Path) -> Result<()> {
+    for name in names {
+        let source = PathBuf::from("bootstrap").join(name);
+        if source.exists() {
+            copy_file_if_exists(&source, &target_dir.join(name))?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn copy_matching_packaged_tools(prefix: &str, extension: &str, target_dir: &Path) -> Result<()> {
+    let dir = PathBuf::from("bootstrap");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(prefix) && name.ends_with(extension) {
+            copy_file_if_exists(&entry.path(), &target_dir.join(name.as_ref()))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            copy_file_if_exists(&entry.path(), &target)?;
+        }
+    }
     Ok(())
 }
 
@@ -587,31 +876,6 @@ fn uv_download_progress(downloaded: usize, total: usize) -> u8 {
     let total = total as u16;
     // 72-82% range for downloads
     (72 + ((clamped * 10) / total) as u8).min(82)
-}
-
-fn count_required_packages(path: &str) -> usize {
-    fs::read_to_string(path)
-        .ok()
-        .map(|content| {
-            content
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#') && line.contains("=="))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-fn get_requirements_file_path() -> String {
-    get_deploy_config()
-        .as_ref()
-        .and_then(|config| config.get("Deploy"))
-        .and_then(|deploy| deploy.get("Python"))
-        .and_then(|python| python.get("RequirementsFile"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.to_owned())
-        .unwrap_or_else(|| "./requirements.txt".to_owned())
 }
 
 fn find_percentage(s: &str) -> Option<u8> {

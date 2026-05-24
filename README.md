@@ -31,15 +31,15 @@ ALAS Launcher: 一种新型的 [AzurLaneAutoScript](https://github.com/LmeSzinc/
 和原版的区别
 ---
 1. 当然是全平台。
-2. 原版启动时除了更新 git repo 还会杀掉现有进程，更新pip，更新electron资源，重启adb。这个版本的启动器会更新 repo，并按 `deploy` 配置执行 pip 依赖安装；如果重复启动，只会重新聚焦已有窗口。
-3. 和原版各个 python 包版本有区别，不过能跑问题不大。pip 自动更新默认已启用。
+2. 原版启动时除了更新 git repo 还会杀掉现有进程，更新 pip，更新 electron 资源，重启 adb。这个版本的启动器会更新 repo，并用 `.venv` 内置的 uv 同步依赖；如果重复启动，只会重新聚焦已有窗口。
+3. Python 包版本由 `pyproject.toml` 和 `uv.lock` 锁定，自动同步默认已启用。
 4. 重启和替换adb不好搞，没做。
 5. 目录结构变动了一下。
 
 具体折腾了些啥？
 ---
-1. 用 `uv` 下载绿色版 Python 3.14.3，这样可以随便哪里都能跑。
-2. 打包时统一按根目录的 `requirements.txt` 安装依赖，避免运行时再去找旧的 `deploy/launcher2/requirements.txt`。
+1. 用启动器内嵌的 uv 创建可重定位 `.venv`，这样用户机器无需预装 uv 或 Python。
+2. 打包时按根目录的 `pyproject.toml` 和 `uv.lock` 同步依赖，运行时也继续用 uv 自动补齐。
 3. 用 Tauri 搓了层壳。理论上原 GUI 用的 Electron 不是不能用吧，在 Mac 上应该可以跑，但怎么看都很草，我研究两下就放弃了。
 4. 打包脚本，全程 GitHub Actions，见 `.github/workflows`。
 5. 稍微去了一下重复文件，不知道为啥 *-nix 应该是符号链接的全给包成了复制，还是说原本应该是硬链接 `cp` 导致的？不知道，反正直接硬链接去重了。懒得研究深度缩小体积了。
@@ -56,23 +56,20 @@ ALAS 启动器
 * MacOS: AzurLaneAutoScript.app/Contents/MacOS/alas-launcher
 * Linux: AzurLaneAutoScript/alas-launcher
 
-Python
-* 所有系统: toolkit （类似 venv 的结构）
+Python / uv
+* 所有系统: `.venv`
 
 Git
-* Unix: 直接安装 Unix 目录结构到 toolkit
-* Windows: 解压 MinGit 到 toolkit/git
+* Unix: `.venv/bin/git`
+* Windows: `.venv/Scripts/git/cmd/git.exe`
 
 Adb
-* Unix: toolkit/bin/adb
-* Windows: toolkit/adb.exe
+* Unix: `.venv/bin/adb`
+* Windows: `.venv/Scripts/adb.exe`
 
 启动器会加的环境变量
 * Unix:
-  - toolbox/bin
-  - toolbox/libexec/git-core
-  - toolbox/lib (LD_LIBRARY_PATH)
+  - `.venv/bin`
 * Windows:
-  - toolbox
-  - toolbox/Scripts
-  - toolbox/git/cmd
+  - `.venv/Scripts`
+  - `.venv/Scripts/git/cmd`

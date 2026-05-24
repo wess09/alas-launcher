@@ -12,6 +12,7 @@ use serde_json::Value as JsonValue;
 use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
+use crate::setup::venv_python;
 
 #[derive(Clone, Debug)]
 pub struct WebuiLaunchConfig {
@@ -149,7 +150,7 @@ impl ManagedBackend {
         std::env::set_var("ALAS_LAUNCHER_PID", format!("{}", std::process::id()));
         kill_processes_using_port(config.port)?;
 
-        let child = Command::new("python")
+        let child = Command::new(venv_python())
             .args(config.args())
             .group()
             .create_no_window()

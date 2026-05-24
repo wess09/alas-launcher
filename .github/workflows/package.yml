@@ -17,7 +17,6 @@ jobs:
     permissions:
       contents: write
     strategy:
-      # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest, windows-latest]
@@ -35,28 +34,29 @@ jobs:
           macos: brew install rdfind
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Prepare bootstrap uv
+        uses: knicknic/os-specific-run@v1.0.3
+        with:
+          linux: |
+            mkdir -p bootstrap
+            cp "$(command -v uv)" bootstrap/uv
+            echo "ALAS_BOOTSTRAP_UV=$PWD/bootstrap/uv" >> "$GITHUB_ENV"
+          macos: |
+            mkdir -p bootstrap
+            cp "$(command -v uv)" bootstrap/uv
+            echo "ALAS_BOOTSTRAP_UV=$PWD/bootstrap/uv" >> "$GITHUB_ENV"
+          windows: |
+            mkdir -ea 0 bootstrap
+            cp (Get-Command uv).Source bootstrap\uv.exe
+            "ALAS_BOOTSTRAP_UV=$PWD\bootstrap\uv.exe" >> $env:GITHUB_ENV
       - name: Rustup for cache
         run: rustup toolchain install stable --profile minimal
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --verbose --release
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-      - name: Install Python and dependencies
-        shell: bash
-        run: |
-          export PYTHON_PREFIX=$(uv run python -c 'import sys; print(sys.exec_prefix)')
-          echo "PYTHON_PREFIX=$PYTHON_PREFIX" >> $GITHUB_ENV
-          uv pip install --prefix "$PYTHON_PREFIX" -r requirements.txt
-          uv pip install --prefix "$PYTHON_PREFIX" uv
-      - name: Shrink python site-packages
-        shell: bash
-        run: |
-          SP=$(find $PYTHON_PREFIX -name site-packages -type d)
-          rm -rf $SP/Crypto/SelfTest
-          find $SP/ -name tests -type d | xargs rm -rf
-          find $SP/ -name '*.pyi' -type f -delete
       - name: Get git
         uses: knicknic/os-specific-run@v1.0.3
         with:
@@ -119,30 +119,35 @@ jobs:
             curl -L -o adb.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
             tar -xvf adb.zip
       - name: Get ALAS
-        run: |
-          git clone https://github.com/wess09/AzurPilot.git AzurLaneAutoScript --depth=1
+        run: git clone https://github.com/wess09/AzurPilot.git AzurLaneAutoScript --depth=1
       - name: Distribute
         uses: knicknic/os-specific-run@v1.0.3
         with:
           macos: |
+            set -eux
             cd AzurLaneAutoScript
-
-            git checkout --detach origin/master
-            git branch -d master
-            git checkout --orphan master
-            git reset --hard
-            git checkout origin/master -- deploy
             rm -rf .git
-
-            mkdir -p toolkit/bin
-            cp ../platform-tools/adb toolkit/bin/
-                        mkdir -p toolkit/libexec/git-core
-            cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
-            ln toolkit/libexec/git-core/git toolkit/bin/
-            cp -r $PYTHON_PREFIX/* toolkit/
-            cp ../requirements.txt requirements.txt
-            mkdir -p config
+            mkdir -p config .venv/bin bootstrap
             cp ../deploy.mac.yaml config/deploy.yaml
+            export UV_PYTHON_INSTALL_DIR="$PWD/.venv/python"
+            uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
+            python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
+            uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
+            uv sync --frozen --no-dev --no-install-project
+            cp ../bootstrap/uv .venv/bin/uv
+            cp ../platform-tools/adb .venv/bin/adb
+            mkdir -p .venv/libexec
+            cp -R ../git/dist/libexec/git-core .venv/libexec/
+            cp ../git/dist/bin/git .venv/bin/git
+            cp .venv/bin/uv bootstrap/uv
+            cp .venv/bin/adb bootstrap/adb
+            cp -R .venv/libexec/git-core bootstrap/
+            cp .venv/bin/git bootstrap/git
+            chmod +x .venv/bin/uv .venv/bin/adb .venv/bin/git
+            .venv/bin/python -c 'import sys; print(sys.version)'
+            .venv/bin/uv --version
+            .venv/bin/adb version
+            .venv/bin/git --version
 
             cd ${{ github.workspace }}
             mkdir -p AzurLaneAutoScript.app/Contents/MacOS
@@ -165,26 +170,31 @@ jobs:
               t.add('AzurLaneAutoScript.app')
             EOF
           linux: |
+            set -eux
             cd AzurLaneAutoScript
-
-            git checkout --detach origin/master
-            git branch -d master
-            git checkout --orphan master
-            git reset --hard
-            git checkout origin/master -- deploy
             rm -rf .git
-
-            mkdir -p toolkit/bin
-            cp ../platform-tools/adb toolkit/bin/
-                        mkdir -p toolkit/libexec/git-core
-            cp -a ../git/dist/libexec/git-core/{git,git-remote-http,git-remote-https} toolkit/libexec/git-core/
-            ln toolkit/libexec/git-core/git toolkit/bin/
-            cp -r $PYTHON_PREFIX/* toolkit/
-            cp ../requirements.txt requirements.txt
-            find toolkit/ -type f -name '*.so*' -or -type f -executable -exec strip --strip-unneeded {} \;
-            mkdir -p config
+            mkdir -p config .venv/bin bootstrap
             cp ../deploy.unix.yaml config/deploy.yaml
+            export UV_PYTHON_INSTALL_DIR="$PWD/.venv/python"
+            uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
+            python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
+            uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
+            uv sync --frozen --no-dev --no-install-project
+            cp ../bootstrap/uv .venv/bin/uv
+            cp ../platform-tools/adb .venv/bin/adb
+            mkdir -p .venv/libexec
+            cp -R ../git/dist/libexec/git-core .venv/libexec/
+            cp ../git/dist/bin/git .venv/bin/git
+            cp .venv/bin/uv bootstrap/uv
+            cp .venv/bin/adb bootstrap/adb
+            cp -R .venv/libexec/git-core bootstrap/
+            cp .venv/bin/git bootstrap/git
+            chmod +x .venv/bin/uv .venv/bin/adb .venv/bin/git
             cp ../target/release/alas-launcher alas-launcher
+            .venv/bin/python -c 'import sys; print(sys.version)'
+            .venv/bin/uv --version
+            .venv/bin/adb version
+            .venv/bin/git --version
 
             cd ${{ github.workspace }}
             rdfind -minsize 128 -makehardlinks true AzurLaneAutoScript
@@ -202,26 +212,33 @@ jobs:
             EOF
           windows: |
             cd AzurLaneAutoScript
-
-            git checkout --detach origin/master
-            git branch -d master
-            git checkout --orphan master
-            git reset --hard
-            git checkout origin/master -- deploy
             rm -r -fo .git
-
-            mkdir -ea 0 toolkit
-            cp ..\platform-tools\adb.exe, ..\platform-tools\Adb*.dll toolkit\
-            mkdir -ea 0 toolkit\git\cmd
-            cp ..\git\cmd\git.exe toolkit\git\cmd\
-            mkdir -ea 0 toolkit\git\mingw64\bin
-            $git_files = @("git.exe","git-remote-http.exe","git-remote-https.exe","libcurl-4.dll") | ForEach-Object { "..\git\mingw64\bin\" + $_ }
-            ..\pedeps\bin\copypedeps.exe -r $git_files toolkit\git\mingw64\bin\
-            cp -r ($env:PYTHON_PREFIX + "\*") toolkit\
-            cp ..\requirements.txt requirements.txt
             mkdir -ea 0 config
+            mkdir -ea 0 bootstrap
             cp ..\deploy.windows.yaml config\deploy.yaml
+            $env:UV_PYTHON_INSTALL_DIR = "$PWD\.venv\python"
+            uv python install --install-dir .venv\python --no-bin --managed-python 3.14.3
+            $python_home = Get-ChildItem .venv\python -Directory | Where-Object { $_.Name -like "cpython-3.14.3-*" } | Select-Object -First 1
+            uv venv --allow-existing --relocatable --python "$($python_home.FullName)\python.exe" .venv
+            uv sync --frozen --no-dev --no-install-project
+            cp ..\bootstrap\uv.exe .venv\Scripts\uv.exe
+            cp ..\platform-tools\adb.exe .venv\Scripts\adb.exe
+            cp ..\platform-tools\Adb*.dll .venv\Scripts\
+            mkdir -ea 0 .venv\Scripts\git\cmd
+            cp ..\git\cmd\git.exe .venv\Scripts\git\cmd\
+            mkdir -ea 0 .venv\Scripts\git\mingw64\bin
+            $git_files = @("git.exe","git-remote-http.exe","git-remote-https.exe","libcurl-4.dll") | ForEach-Object { "..\git\mingw64\bin\" + $_ }
+            ..\pedeps\bin\copypedeps.exe -r $git_files .venv\Scripts\git\mingw64\bin\
+            cp .venv\Scripts\uv.exe bootstrap\uv.exe
+            cp .venv\Scripts\adb.exe bootstrap\adb.exe
+            cp .venv\Scripts\Adb*.dll bootstrap\
+            mkdir -ea 0 bootstrap\git
+            cp -r .venv\Scripts\git\* bootstrap\git\
             cp ..\target\release\alas-launcher.exe alas-launcher.exe
+            .venv\Scripts\python.exe -c "import sys; print(sys.version)"
+            .venv\Scripts\uv.exe --version
+            .venv\Scripts\adb.exe version
+            .venv\Scripts\git\cmd\git.exe --version
 
             cd ${{ github.workspace }}
             uv run python -c @"

@@ -30,15 +30,15 @@ Screenshots
 Differences from Original Version
 ---
 1. Cross-platform, of course.
-2. The original launcher updates git repo, kills existing processes, updates pip, updates electron resources, and restarts adb on startup. This version updates the repo and installs pip dependencies according to the `deploy` config; if launched multiple times, it only refocuses the existing window.
-3. Python package versions differ from original, but it works fine. Automatic pip updates are enabled by default.
+2. The original launcher updates git repo, kills existing processes, updates pip, updates electron resources, and restarts adb on startup. This version updates the repo and syncs dependencies with the uv embedded in `.venv`; if launched multiple times, it only refocuses the existing window.
+3. Python package versions are locked by `pyproject.toml` and `uv.lock`. Automatic sync is enabled by default.
 4. Restarting and replacing adb is tricky, not implemented.
 5. Directory structure has been modified slightly.
 
 Technical Details
 ---
-1. Used `uv` to download portable Python 3.14.3, so it can run anywhere.
-2. Packaged dependencies are now installed from the repo-root `requirements.txt`, instead of relying on the old `deploy/launcher2/requirements.txt`.
+1. Uses the launcher's embedded uv to create a relocatable `.venv`, so users do not need system uv or Python.
+2. Packaged dependencies are synced from the repo-root `pyproject.toml` and `uv.lock`, and runtime sync uses the same uv project metadata.
 3. Used Tauri for the shell. Original GUI's Electron could probably work on Mac, but it looked messy so I gave up after brief research.
 4. Packaging scripts, all on GitHub Actions, see `.github/workflows`.
 5. Removed some duplicate files. Not sure why *-nix symlinks were all packed as copies, or if it was due to `cp` with hardlinks? Anyway, just deduped with hardlinks. Too lazy to investigate deeper compression.
@@ -55,23 +55,20 @@ ALAS Launcher
 * MacOS: AzurLaneAutoScript.app/Contents/MacOS/alas-launcher
 * Linux: AzurLaneAutoScript/alas-launcher
 
-Python
-* All systems: toolkit (similar to venv structure)
+Python / uv
+* All systems: `.venv`
 
 Git
-* Unix: Installed with Unix directory structure to toolkit
-* Windows: MinGit extracted to toolkit/git
+* Unix: `.venv/bin/git`
+* Windows: `.venv/Scripts/git/cmd/git.exe`
 
 Adb
-* Unix: toolkit/bin/adb
-* Windows: toolkit/adb.exe
+* Unix: `.venv/bin/adb`
+* Windows: `.venv/Scripts/adb.exe`
 
 Environment Variables Added by Launcher
 * Unix:
-  - toolbox/bin
-  - toolbox/libexec/git-core
-  - toolbox/lib (LD_LIBRARY_PATH)
+  - `.venv/bin`
 * Windows:
-  - toolbox
-  - toolbox/Scripts
-  - toolbox/git/cmd
+  - `.venv/Scripts`
+  - `.venv/Scripts/git/cmd`
