@@ -133,7 +133,6 @@ jobs:
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
-            uv sync --frozen --no-dev --no-install-project
             cp ../bootstrap/uv .venv/bin/uv
             cp ../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
@@ -154,7 +153,7 @@ jobs:
             cp target/release/alas-launcher AzurLaneAutoScript.app/Contents/MacOS/
             mkdir -p AzurLaneAutoScript.app/Contents/Resources
             cp icons/icon.icns AzurLaneAutoScript.app/Contents/Resources/
-            cp -r AzurLaneAutoScript AzurLaneAutoScript.app/Contents/
+            ditto AzurLaneAutoScript AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
             cp Info.plist AzurLaneAutoScript.app/Contents/
             rdfind -minsize 128 -makehardlinks true AzurLaneAutoScript.app
             uv run python - <<EOF
@@ -179,7 +178,6 @@ jobs:
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
-            uv sync --frozen --no-dev --no-install-project
             cp ../bootstrap/uv .venv/bin/uv
             cp ../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
@@ -220,7 +218,6 @@ jobs:
             uv python install --install-dir .venv\python --no-bin --managed-python 3.14.3
             $python_home = Get-ChildItem .venv\python -Directory | Where-Object { $_.Name -like "cpython-3.14.3-*" } | Select-Object -First 1
             uv venv --allow-existing --relocatable --python "$($python_home.FullName)\python.exe" .venv
-            uv sync --frozen --no-dev --no-install-project
             cp ..\bootstrap\uv.exe .venv\Scripts\uv.exe
             cp ..\platform-tools\adb.exe .venv\Scripts\adb.exe
             cp ..\platform-tools\Adb*.dll .venv\Scripts\
