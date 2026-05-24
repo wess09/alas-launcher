@@ -465,14 +465,7 @@ gm.git_install()
 }
 
 fn uv_sync_project(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path) -> Result<()> {
-    let mirror = get_deploy_config()
-        .as_ref()
-        .and_then(|c| c.get("Deploy"))
-        .and_then(|d| d.get("Python"))
-        .and_then(|p| p.get("PypiMirror"))
-        .and_then(|v| v.as_str())
-        .filter(|m| !m.is_empty() && *m != "null")
-        .map(|m| m.to_owned());
+    let mirror = deploy_pypi_mirror();
 
     let bootstrap_uv = bootstrap_uv.to_path_buf();
     run_command_with_retry(
@@ -569,10 +562,47 @@ fn atomic_failure_cleanup(path: &str) -> Result<()> {
 
 fn ensure_runtime_tools(bootstrap_uv: &Path) -> Result<()> {
     ensure_self_contained_python(bootstrap_uv)?;
+    ensure_deploy_python_dependencies(bootstrap_uv)?;
 
     copy_file_if_exists(bootstrap_uv, &venv_uv())?;
     ensure_adb_in_venv()?;
     ensure_git_in_venv()?;
+    Ok(())
+}
+
+fn deploy_pypi_mirror() -> Option<String> {
+    get_deploy_config()
+        .as_ref()
+        .and_then(|c| c.get("Deploy"))
+        .and_then(|d| d.get("Python"))
+        .and_then(|p| p.get("PypiMirror"))
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty() && *m != "null")
+        .map(|m| m.to_owned())
+}
+
+fn ensure_deploy_python_dependencies(bootstrap_uv: &Path) -> Result<()> {
+    let status = Command::new(venv_python())
+        .args(["-c", "import requests"])
+        .create_no_window()
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new(bootstrap_uv);
+    cmd.args(["pip", "install", "--python"])
+        .arg(venv_python())
+        .arg("requests")
+        .env("UV_NO_PROGRESS", "1")
+        .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+    if let Some(mirror) = deploy_pypi_mirror() {
+        cmd.args(["--default-index", &mirror]);
+    }
+    let status = cmd.create_no_window().status()?;
+    if !status.success() {
+        bail!("安装 deploy 基础依赖 requests 失败");
+    }
     Ok(())
 }
 

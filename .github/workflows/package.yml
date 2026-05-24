@@ -135,6 +135,7 @@ jobs:
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
+            uv pip install --python .venv/bin/python requests
             cp ../bootstrap/uv .venv/bin/uv
             cp ../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
@@ -180,6 +181,7 @@ jobs:
             uv python install --install-dir .venv/python --no-bin --managed-python 3.14.3
             python_home="$(find .venv/python -maxdepth 1 -type d -name 'cpython-3.14.3-*' | head -n1)"
             uv venv --allow-existing --relocatable --python "$python_home/bin/python3.14" .venv
+            uv pip install --python .venv/bin/python requests
             cp ../bootstrap/uv .venv/bin/uv
             cp ../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
@@ -220,6 +222,7 @@ jobs:
             uv python install --install-dir .venv\python --no-bin --managed-python 3.14.3
             $python_home = Get-ChildItem .venv\python -Directory | Where-Object { $_.Name -like "cpython-3.14.3-*" } | Select-Object -First 1
             uv venv --allow-existing --relocatable --python "$($python_home.FullName)\python.exe" .venv
+            uv pip install --python .venv\Scripts\python.exe requests
             cp ..\bootstrap\uv.exe .venv\Scripts\uv.exe
             cp ..\platform-tools\adb.exe .venv\Scripts\adb.exe
             cp ..\platform-tools\Adb*.dll .venv\Scripts\
