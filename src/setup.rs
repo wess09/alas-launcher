@@ -202,6 +202,14 @@ fn venv_git() -> PathBuf {
     }
 }
 
+fn venv_git_exec_path() -> PathBuf {
+    venv_dir().join("libexec").join("git-core")
+}
+
+fn venv_git_template_dir() -> PathBuf {
+    venv_dir().join("share").join("git-core").join("templates")
+}
+
 fn bootstrap_uv_path() -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!("azurpilot-bootstrap-{}", std::process::id()));
     fs::create_dir_all(&dir)?;
@@ -253,6 +261,16 @@ pub fn setup_environment() -> Result<()> {
     prepend_path_to_env("PATH", venv_bin_dir());
     if cfg!(windows) {
         prepend_path_to_env("PATH", venv_bin_dir().join("git").join("cmd"));
+    } else {
+        let git_exec_path = venv_git_exec_path();
+        if git_exec_path.exists() {
+            std::env::set_var("GIT_EXEC_PATH", git_exec_path);
+        }
+
+        let git_template_dir = venv_git_template_dir();
+        if git_template_dir.exists() {
+            std::env::set_var("GIT_TEMPLATE_DIR", git_template_dir);
+        }
     }
     Ok(())
 }
@@ -791,21 +809,29 @@ fn ensure_adb_in_venv() -> Result<()> {
 }
 
 fn ensure_git_in_venv() -> Result<()> {
-    if venv_git().exists() {
-        return Ok(());
-    }
     if cfg!(windows) {
-        let src = PathBuf::from("bootstrap").join("git");
-        let dst = venv_bin_dir().join("git");
-        if src.exists() {
-            copy_dir_all(&src, &dst)?;
+        if !venv_git().exists() {
+            let src = PathBuf::from("bootstrap").join("git");
+            let dst = venv_bin_dir().join("git");
+            if src.exists() {
+                copy_dir_all(&src, &dst)?;
+            }
         }
     } else {
-        copy_first_packaged_tool(&["git"], &venv_bin_dir())?;
-        let src = PathBuf::from("bootstrap").join("git-core");
-        let dst = venv_dir().join("libexec").join("git-core");
-        if src.exists() {
-            copy_dir_all(&src, &dst)?;
+        if !venv_git().exists() {
+            copy_first_packaged_tool(&["git"], &venv_bin_dir())?;
+        }
+
+        let git_core_src = PathBuf::from("bootstrap").join("git-core");
+        let git_core_dst = venv_git_exec_path();
+        if !git_core_dst.exists() && git_core_src.exists() {
+            copy_dir_all(&git_core_src, &git_core_dst)?;
+        }
+
+        let templates_src = PathBuf::from("bootstrap").join("git-templates");
+        let templates_dst = venv_git_template_dir();
+        if !templates_dst.exists() && templates_src.exists() {
+            copy_dir_all(&templates_src, &templates_dst)?;
         }
     }
     Ok(())

@@ -143,15 +143,20 @@ jobs:
             cp ../../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
             cp -R ../../git/dist/libexec/git-core .venv/libexec/
+            mkdir -p .venv/share/git-core
+            cp -R ../../git/dist/share/git-core/templates .venv/share/git-core/
             cp ../../git/dist/bin/git .venv/bin/git
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
+            cp -R .venv/share/git-core/templates bootstrap/git-templates
             cp .venv/bin/git bootstrap/git
             chmod +x .venv/bin/uv .venv/bin/adb .venv/bin/git
             .venv/bin/python -c 'import sys; print(sys.version)'
             .venv/bin/uv --version
             .venv/bin/adb version
             .venv/bin/git --version
+            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git init git-smoke
+            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git ls-remote https://github.com/git/git.git HEAD
 
             cd ${{ github.workspace }}
             mkdir -p AzurLaneAutoScript.app/Contents/MacOS
@@ -191,9 +196,12 @@ jobs:
             cp ../../platform-tools/adb .venv/bin/adb
             mkdir -p .venv/libexec
             cp -R ../../git/dist/libexec/git-core .venv/libexec/
+            mkdir -p .venv/share/git-core
+            cp -R ../../git/dist/share/git-core/templates .venv/share/git-core/
             cp ../../git/dist/bin/git .venv/bin/git
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
+            cp -R .venv/share/git-core/templates bootstrap/git-templates
             cp .venv/bin/git bootstrap/git
             chmod +x .venv/bin/uv .venv/bin/adb .venv/bin/git
             cp ../../target/release/alas-launcher alas-launcher
@@ -201,6 +209,8 @@ jobs:
             .venv/bin/uv --version
             .venv/bin/adb version
             .venv/bin/git --version
+            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git init git-smoke
+            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git ls-remote https://github.com/git/git.git HEAD
 
             cd ${{ github.workspace }}
             rdfind -minsize 128 -makehardlinks true package-root/AzurLaneAutoScript
