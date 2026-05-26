@@ -210,7 +210,7 @@ jobs:
             .venv/bin/adb version
             .venv/bin/git --version
             GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git init git-smoke
-            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git ls-remote https://github.com/git/git.git HEAD
+            GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt .venv/bin/git ls-remote https://github.com/git/git.git HEAD
 
             cd ${{ github.workspace }}
             rdfind -minsize 128 -makehardlinks true package-root/AzurLaneAutoScript

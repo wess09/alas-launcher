@@ -279,6 +279,7 @@ pub fn setup_environment() -> Result<()> {
 fn setup_git_ca_bundle() {
     let cert_file = openssl_probe::probe().cert_file;
     if let Some(file) = cert_file.as_ref().and_then(|f| f.to_str()) {
+        std::env::set_var("GIT_SSL_CAINFO", file);
         let _ = Command::new("git")
             .args(["config", "--local", "http.sslCAInfo", file])
             .status();
