@@ -125,4 +125,4 @@ GitHub Actions（`.github/workflows/package.yml`）：
 - 后端端口等待超时：60 秒
 - 后端连接检查超时：500 毫秒
 - 通知流断线重连间隔：3 秒
-- `UV_PYTHON_INSTALL_MIRROR` 默认使用 `ghfast.top` 代理加速 GitHub 下载
+- `UV_PYTHON_INSTALL_MIRROR` 默认使用 npmmirror 加速 Python standalone 下载，并以 python-standalone.org 作为备用源

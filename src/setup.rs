@@ -1052,30 +1052,50 @@ fn ensure_self_contained_python(
                 venv_python_install_dir().display()
             )
         })?;
-        status_updater(runtime_tools_update(
-            "下载 Python",
-            format!("正在下载 Python {PYTHON_VERSION}，首次启动可能需要几分钟。"),
-            11,
-        ));
-        let mut cmd = Command::new(bootstrap_uv);
-        cmd.args(["python", "install", "--install-dir"])
-            .arg(venv_python_install_dir())
-            .args(["--no-bin", "--managed-python", PYTHON_VERSION]);
-        uv_python_env(&mut cmd);
-        let mut elapsed_ticks = 0u16;
-        let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
-            elapsed_ticks = elapsed_ticks.saturating_add(1);
-            if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
-                status_updater(runtime_wait_update(
-                    "下载 Python",
-                    &format!("正在下载 Python {PYTHON_VERSION}"),
-                    elapsed_ticks,
-                    11,
-                    13,
-                ));
+        let mirrors = uv_python_install_mirrors();
+        let mut downloaded = false;
+        for (index, mirror) in mirrors.iter().enumerate() {
+            status_updater(runtime_tools_update(
+                "下载 Python",
+                format!(
+                    "正在下载 Python {PYTHON_VERSION}",
+                    index + 1,
+                    mirrors.len(),
+                    mirror
+                ),
+                11,
+            ));
+            let mut cmd = Command::new(bootstrap_uv);
+            cmd.args(["python", "install", "--install-dir"])
+                .arg(venv_python_install_dir())
+                .args([
+                    "--no-bin",
+                    "--managed-python",
+                    "--mirror",
+                    mirror,
+                    PYTHON_VERSION,
+                ]);
+            uv_python_env(&mut cmd);
+            let mut elapsed_ticks = 0u16;
+            let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
+                elapsed_ticks = elapsed_ticks.saturating_add(1);
+                if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
+                    status_updater(runtime_wait_update(
+                        "下载 Python",
+                        &format!("正在下载 Python {PYTHON_VERSION}"),
+                        elapsed_ticks,
+                        11,
+                        13,
+                    ));
+                }
+            })?;
+            if status.success() {
+                downloaded = true;
+                break;
             }
-        })?;
-        if !status.success() {
+            warn!("下载 Python {PYTHON_VERSION} 失败，镜像：{mirror}");
+        }
+        if !downloaded {
             bail!("下载 Python {PYTHON_VERSION} 失败");
         }
     }
