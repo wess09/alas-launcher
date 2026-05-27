@@ -1,6 +1,6 @@
 [package]
 name = "alas-launcher"
-version = "1.6.3-test"
+version = "1.6.3"
 description = "AzurPilot launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
 edition = "2021"
