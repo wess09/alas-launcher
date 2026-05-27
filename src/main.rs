@@ -8,8 +8,11 @@ mod window_util;
 
 use std::{
     cell::Cell,
+    collections::HashMap,
     fs,
     net::{SocketAddr, TcpStream},
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -18,11 +21,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use reqwest::header::DATE;
+use serde::Deserialize;
 use serde_json::to_string;
+use sha2::{Digest, Sha256};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -66,12 +71,28 @@ const SPLASH_URL: &str = "http://alas-splash.localhost/";
 #[cfg(not(any(windows, target_os = "android")))]
 const SPLASH_URL: &str = "alas-splash://localhost/";
 const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
+const LAUNCHER_UPDATE_URL: &str = "https://alas.nanoda.work/updata/stable.json";
+const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
+#[cfg(windows)]
+const LAUNCHER_UPDATE_NO_CONSOLE_ENV: &str = "AZURPILOT_NO_ATTACH_CONSOLE";
 
 #[derive(Clone, Debug)]
 struct TimeBombConfig {
     expires_at: DateTime<FixedOffset>,
     network_time_url: String,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LauncherUpdateManifest {
+    version: String,
+    platforms: HashMap<String, LauncherUpdatePlatform>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LauncherUpdatePlatform {
+    url: String,
+    sha256: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -256,6 +277,174 @@ fn fetch_network_time(url: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc2822(date_header)?.with_timezone(&Utc))
 }
 
+fn check_launcher_update_and_restart() -> Result<bool> {
+    if std::env::var_os(LAUNCHER_UPDATE_SKIP_ENV).is_some() {
+        info!("Skipping launcher update check after restart");
+        std::env::remove_var(LAUNCHER_UPDATE_SKIP_ENV);
+        return Ok(false);
+    }
+
+    let platform_key = launcher_update_platform_key();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let manifest_text = client.get(LAUNCHER_UPDATE_URL).send()?.text()?;
+    let manifest: LauncherUpdateManifest = serde_json::from_str(&manifest_text)?;
+    let current_version = env!("CARGO_PKG_VERSION");
+    if !launcher_version_is_newer(current_version, &manifest.version) {
+        info!(
+            "Launcher is up to date: current={}, latest={}",
+            current_version, manifest.version
+        );
+        return Ok(false);
+    }
+
+    let Some(platform) = manifest.platforms.get(platform_key) else {
+        warn!("No launcher update payload for platform {platform_key}");
+        return Ok(false);
+    };
+
+    info!(
+        "Launcher update available: {} -> {}",
+        current_version, manifest.version
+    );
+    let bytes = client.get(&platform.url).send()?.bytes()?;
+    let digest = Sha256::digest(&bytes);
+    let digest_hex = bytes_to_hex(&digest);
+    if !digest_hex.eq_ignore_ascii_case(&platform.sha256) {
+        return Err(anyhow!(
+            "launcher update sha256 mismatch: expected {}, got {}",
+            platform.sha256,
+            digest_hex
+        ));
+    }
+
+    let current_exe = std::env::current_exe()?;
+    let update_path = launcher_update_temp_path(&current_exe);
+    fs::write(&update_path, &bytes)
+        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+    make_executable(&update_path)?;
+    replace_launcher_and_restart(&current_exe, &update_path)?;
+    Ok(true)
+}
+
+fn launcher_update_platform_key() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin-aarch64",
+        ("macos", "x86_64") => "darwin-x86_64",
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("windows", "x86_64") => "windows-x86_64",
+        ("windows", "x86") => "windows-i686",
+        ("windows", "aarch64") => "windows-aarch64",
+        _ => "unknown",
+    }
+}
+
+fn launcher_version_is_newer(current: &str, latest: &str) -> bool {
+    let current = parse_launcher_version(current);
+    let latest = parse_launcher_version(latest);
+    latest > current
+}
+
+fn parse_launcher_version(version: &str) -> (u64, u64, u64, u64) {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
+    let mut nums = core.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+    let major = nums.next().unwrap_or(0);
+    let minor = nums.next().unwrap_or(0);
+    let patch = nums.next().unwrap_or(0);
+    let suffix_rank = suffix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse::<u64>()
+        .unwrap_or(0);
+    (major, minor, patch, suffix_rank)
+}
+
+fn launcher_update_temp_path(current_exe: &Path) -> PathBuf {
+    let file_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("alas-launcher");
+    std::env::temp_dir().join(format!(
+        "azurpilot-launcher-update-{}-{file_name}",
+        std::process::id()
+    ))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn make_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Result<()> {
+    fs::rename(update_path, current_exe)
+        .with_context(|| format!("替换启动器失败：{}", current_exe.display()))?;
+    Command::new(current_exe)
+        .env(LAUNCHER_UPDATE_SKIP_ENV, "1")
+        .spawn()
+        .with_context(|| format!("重启启动器失败：{}", current_exe.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Result<()> {
+    let script_path = std::env::temp_dir().join(format!(
+        "azurpilot-launcher-update-{}.cmd",
+        std::process::id()
+    ));
+    let script = format!(
+        "@echo off\r\n\
+         setlocal\r\n\
+         timeout /t 1 /nobreak >nul\r\n\
+         move /y \"{}\" \"{}\" >nul\r\n\
+         set {}=1\r\n\
+         set {}=1\r\n\
+         start \"\" \"{}\"\r\n\
+         del \"%~f0\"\r\n",
+        update_path.display(),
+        current_exe.display(),
+        LAUNCHER_UPDATE_SKIP_ENV,
+        LAUNCHER_UPDATE_NO_CONSOLE_ENV,
+        current_exe.display()
+    );
+    fs::write(&script_path, script)?;
+    use std::os::windows::process::CommandExt;
+    use winapi::um::winbase::CREATE_NO_WINDOW;
+    Command::new("cmd")
+        .args(["/C", &script_path.to_string_lossy()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .with_context(|| format!("启动更新脚本失败：{}", script_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,13 +489,25 @@ fn main() -> Result<()> {
         use crate::window_util::HAS_CONSOLE;
         use std::sync::atomic::Ordering;
         use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
-        HAS_CONSOLE.store(AttachConsole(ATTACH_PARENT_PROCESS) != 0, Ordering::Relaxed);
+        if std::env::var_os(LAUNCHER_UPDATE_NO_CONSOLE_ENV).is_some() {
+            std::env::remove_var(LAUNCHER_UPDATE_NO_CONSOLE_ENV);
+        } else {
+            HAS_CONSOLE.store(AttachConsole(ATTACH_PARENT_PROCESS) != 0, Ordering::Relaxed);
+        }
     }
     setup_environment()?;
     let _log_guard = initialize_logging()?;
 
     info!("=== AzurPilot starting ===");
     info!("Launcher log file: log/{}", today_launcher_log_filename());
+    match check_launcher_update_and_restart() {
+        Ok(true) => {
+            info!("Launcher update installed, restarting");
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(e) => warn!("Launcher update check failed: {e:#}"),
+    }
 
     let deploy_config = get_deploy_config();
     let webui_config = WebuiLaunchConfig::from_deploy_config(deploy_config.as_ref());
