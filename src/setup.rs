@@ -359,7 +359,7 @@ pub fn cleanup_runtime_for_rebuild() -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("无法获取启动器所在目录"))?
         .canonicalize()?;
-    if repo_dir != exe_dir {
+    if !cleanup_target_belongs_to_launcher(&repo_dir, &exe_dir) {
         bail!(
             "拒绝清理非启动器目录：{} != {}",
             repo_dir.display(),
@@ -427,6 +427,27 @@ fn path_is_inside(path: &Path, parent: &Path) -> bool {
     path.canonicalize()
         .map(|path| path.starts_with(parent))
         .unwrap_or(false)
+}
+
+fn cleanup_target_belongs_to_launcher(repo_dir: &Path, exe_dir: &Path) -> bool {
+    if repo_dir == exe_dir {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(contents_dir) = exe_dir.parent() else {
+            return false;
+        };
+        let expected_repo_dir = contents_dir.join("AzurLaneAutoScript");
+        return exe_dir.file_name() == Some(std::ffi::OsStr::new("MacOS"))
+            && repo_dir == expected_repo_dir;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 fn should_keep_runtime_entry(path: &Path, current_exe_name: &str) -> bool {

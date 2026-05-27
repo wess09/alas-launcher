@@ -423,7 +423,9 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 {
                     info!("Setting macOS tray to show menu on left click");
-                    tray_builder = tray_builder.show_menu_on_left_click(true);
+                    tray_builder = tray_builder
+                        .icon_as_template(true)
+                        .show_menu_on_left_click(true);
                 }
 
                 match tray_builder
@@ -445,6 +447,13 @@ fn main() -> Result<()> {
                     }
                     })
                     .on_tray_icon_event(move |tray, event| {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = tray;
+                            let _ = event;
+                            return;
+                        }
+
                         if let tauri::tray::TrayIconEvent::Click {
                             button: tauri::tray::MouseButton::Left,
                             button_state: tauri::tray::MouseButtonState::Up,
