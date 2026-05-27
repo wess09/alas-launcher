@@ -1030,6 +1030,12 @@ fn ensure_self_contained_python(
     }
 
     if managed_python_executable().is_none() {
+        fs::create_dir_all(venv_python_install_dir()).with_context(|| {
+            format!(
+                "创建 Python 安装目录失败：{}",
+                venv_python_install_dir().display()
+            )
+        })?;
         status_updater(runtime_tools_update(
             "下载 Python",
             format!("正在下载 Python {PYTHON_VERSION}，首次启动可能需要几分钟。"),
@@ -1065,6 +1071,7 @@ fn ensure_self_contained_python(
         "正在创建 .venv 并绑定内置 Python。",
         13,
     ));
+    reset_virtualenv_layout()?;
     let mut cmd = Command::new(bootstrap_uv);
     cmd.args(["venv", "--allow-existing", "--relocatable", "--python"])
         .arg(managed_python)
@@ -1074,6 +1081,25 @@ fn ensure_self_contained_python(
     if !status.success() {
         bail!("创建 .venv 失败");
     }
+    Ok(())
+}
+
+fn reset_virtualenv_layout() -> Result<()> {
+    let venv = venv_dir();
+    let entries = if cfg!(windows) {
+        vec!["Scripts", "Lib", "Include", "pyvenv.cfg"]
+    } else {
+        vec!["bin", "lib", "include", "pyvenv.cfg"]
+    };
+
+    for entry in entries {
+        let path = venv.join(entry);
+        if path.exists() {
+            remove_runtime_entry_with_retry(&path)
+                .with_context(|| format!("重置 .venv 结构失败：{}", path.display()))?;
+        }
+    }
+
     Ok(())
 }
 
