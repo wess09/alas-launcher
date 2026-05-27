@@ -425,9 +425,7 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 {
                     info!("Setting macOS tray to show menu on left click");
-                    tray_builder = tray_builder
-                        .icon_as_template(true)
-                        .show_menu_on_left_click(true);
+                    tray_builder = tray_builder.show_menu_on_left_click(true);
                 }
 
                 match tray_builder
