@@ -1055,13 +1055,13 @@ fn ensure_self_contained_python(
         let mirrors = uv_python_install_mirrors();
         let mut downloaded = false;
         for (index, mirror) in mirrors.iter().enumerate() {
+            let mirror_label = if index == 0 { "主源" } else { "备用源" };
             status_updater(runtime_tools_update(
                 "下载 Python",
                 format!(
-                    "正在下载 Python {PYTHON_VERSION}",
+                    "正在下载 Python {PYTHON_VERSION}，正在尝试{mirror_label}（{}/{}）。",
                     index + 1,
-                    mirrors.len(),
-                    mirror
+                    mirrors.len()
                 ),
                 11,
             ));

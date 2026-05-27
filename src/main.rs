@@ -390,6 +390,7 @@ fn main() -> Result<()> {
                 info!("Creating system tray...");
                 let allow_exit = allow_exit_for_setup.clone();
                 let recreating_main_window_for_menu = recreating_main_window_for_setup.clone();
+                #[cfg(windows)]
                 let recreating_main_window_for_tray = recreating_main_window_for_setup.clone();
                 let show_item = MenuItemBuilder::new("显示 / 隐藏")
                     .id("toggle_visibility")
@@ -448,13 +449,7 @@ fn main() -> Result<()> {
                     }
                     })
                     .on_tray_icon_event(move |tray, event| {
-                        #[cfg(target_os = "macos")]
-                        {
-                            let _ = tray;
-                            let _ = event;
-                            return;
-                        }
-
+                        #[cfg(windows)]
                         if let tauri::tray::TrayIconEvent::Click {
                             button: tauri::tray::MouseButton::Left,
                             button_state: tauri::tray::MouseButtonState::Up,
@@ -467,6 +462,12 @@ fn main() -> Result<()> {
                                 port,
                                 recreating_main_window_for_tray.clone(),
                             );
+                        }
+
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = tray;
+                            let _ = event;
                         }
                     })
                     .build(app) {
