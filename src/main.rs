@@ -56,6 +56,7 @@ const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
 const SPLASH_BG_LIGHT: &[u8] = include_bytes!("../bg/l_bg.png");
 const SPLASH_BG_DARK: &[u8] = include_bytes!("../bg/b_bg.png");
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const BACKEND_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(windows, target_os = "android"))]
 const BACKEND_ERROR_URL_BASE: &str = "http://alas-error.localhost/backend";
 #[cfg(not(any(windows, target_os = "android")))]
@@ -972,8 +973,24 @@ fn check_backend_connection(port: u16) -> Result<()> {
         .map_err(|e| anyhow!("Unable to connect to local backend at {address}: {e}"))
 }
 
+fn wait_for_backend_connection(port: u16, timeout: Duration) -> Result<()> {
+    let started_at = Instant::now();
+    let mut last_error = None;
+    while started_at.elapsed() < timeout {
+        match check_backend_connection(port) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_error = Some(e);
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("等待本地后端启动超时")))
+}
+
 fn navigate_backend_or_error(window: &WebviewWindow, port: u16) -> Result<bool> {
-    match check_backend_connection(port) {
+    match wait_for_backend_connection(port, BACKEND_NAVIGATION_TIMEOUT) {
         Ok(()) => {
             let url = backend_url(port);
             window.navigate(Url::parse(&url)?)?;
