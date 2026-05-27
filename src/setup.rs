@@ -281,17 +281,21 @@ pub fn setup_environment() -> Result<()> {
     if cfg!(windows) {
         prepend_path_to_env("PATH", venv_bin_dir().join("git").join("cmd"));
     } else {
-        let git_exec_path = venv_git_exec_path();
-        if git_exec_path.exists() {
-            std::env::set_var("GIT_EXEC_PATH", git_exec_path);
-        }
-
-        let git_template_dir = venv_git_template_dir();
-        if git_template_dir.exists() {
-            std::env::set_var("GIT_TEMPLATE_DIR", git_template_dir);
-        }
+        refresh_git_environment();
     }
     Ok(())
+}
+
+fn refresh_git_environment() {
+    let git_exec_path = venv_git_exec_path();
+    if git_exec_path.exists() {
+        std::env::set_var("GIT_EXEC_PATH", git_exec_path);
+    }
+
+    let git_template_dir = venv_git_template_dir();
+    if git_template_dir.exists() {
+        std::env::set_var("GIT_TEMPLATE_DIR", git_template_dir);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -460,7 +464,8 @@ fn should_keep_runtime_entry(path: &Path, current_exe_name: &str) -> bool {
     matches!(
         name.as_str(),
         "deploy" | "log" | "config" | "bootstrap" | "unins000.dat" | "unins000.exe"
-    ) || name == "alas-launcher.exe"
+    ) || (cfg!(target_os = "macos") && name == ".venv")
+        || name == "alas-launcher.exe"
         || name == current_exe_name
 }
 
@@ -1250,7 +1255,8 @@ fn ensure_git_in_venv() -> Result<()> {
 
         let git_core_src = PathBuf::from("bootstrap").join("git-core");
         let git_core_dst = venv_git_exec_path();
-        if !git_core_dst.exists() && git_core_src.exists() {
+        let git_remote_https = git_core_dst.join("git-remote-https");
+        if (!git_core_dst.exists() || !git_remote_https.exists()) && git_core_src.exists() {
             copy_dir_all(&git_core_src, &git_core_dst)?;
         }
 
@@ -1259,6 +1265,8 @@ fn ensure_git_in_venv() -> Result<()> {
         if !templates_dst.exists() && templates_src.exists() {
             copy_dir_all(&templates_src, &templates_dst)?;
         }
+
+        refresh_git_environment();
     }
     Ok(())
 }

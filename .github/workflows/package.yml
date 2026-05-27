@@ -146,6 +146,7 @@ jobs:
             mkdir -p .venv/share/git-core
             cp -R ../../git/dist/share/git-core/templates .venv/share/git-core/
             cp ../../git/dist/bin/git .venv/bin/git
+            test -x .venv/libexec/git-core/git-remote-https
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
             cp -R .venv/share/git-core/templates bootstrap/git-templates
@@ -199,6 +200,7 @@ jobs:
             mkdir -p .venv/share/git-core
             cp -R ../../git/dist/share/git-core/templates .venv/share/git-core/
             cp ../../git/dist/bin/git .venv/bin/git
+            test -x .venv/libexec/git-core/git-remote-https
             cp .venv/bin/adb bootstrap/adb
             cp -R .venv/libexec/git-core bootstrap/
             cp -R .venv/share/git-core/templates bootstrap/git-templates
