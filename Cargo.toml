@@ -28,7 +28,7 @@ ctrlc = "3.5.0"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 
 [package.metadata.alas-launcher.time-bomb]
-enabled = true
+enabled = false
 expires-at = "2026-05-28T05:00:00+08:00"
 network-time-url = "https://www.aliyun.com"
 message = "测试已结束，请安装正式版"
