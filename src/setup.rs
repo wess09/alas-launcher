@@ -97,8 +97,10 @@ const MAX_UPDATE_RETRIES: usize = 20;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const CLEANUP_RETRIES: usize = 20;
 const PYTHON_VERSION: &str = "3.14.3";
-const DEFAULT_UV_PYTHON_INSTALL_MIRROR: &str =
-    "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download";
+const DEFAULT_UV_PYTHON_INSTALL_MIRRORS: &[&str] = &[
+    "https://registry.npmmirror.com/-/binary/python-build-standalone/",
+    "https://python-standalone.org/mirror/astral-sh/python-build-standalone/",
+];
 const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
 fn default_deploy_config() -> &'static str {
@@ -1011,8 +1013,22 @@ fn uv_python_env(cmd: &mut Command) {
     cmd.env("UV_NO_PROGRESS", "1")
         .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
     if std::env::var_os("UV_PYTHON_INSTALL_MIRROR").is_none() {
-        cmd.env("UV_PYTHON_INSTALL_MIRROR", DEFAULT_UV_PYTHON_INSTALL_MIRROR);
+        cmd.env(
+            "UV_PYTHON_INSTALL_MIRROR",
+            DEFAULT_UV_PYTHON_INSTALL_MIRRORS[0],
+        );
     }
+}
+
+fn uv_python_install_mirrors() -> Vec<String> {
+    if let Some(mirror) = std::env::var_os("UV_PYTHON_INSTALL_MIRROR") {
+        return vec![mirror.to_string_lossy().into_owned()];
+    }
+
+    DEFAULT_UV_PYTHON_INSTALL_MIRRORS
+        .iter()
+        .map(|mirror| (*mirror).to_owned())
+        .collect()
 }
 
 fn ensure_self_contained_python(
