@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -8,7 +8,11 @@ use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Sender};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, RecvTimeoutError, Sender},
+    Arc,
+};
 use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -84,9 +88,17 @@ enum ScriptPhase {
     Dependencies { total_packages: usize },
 }
 
+#[derive(Default)]
+struct GitProgressState {
+    progress: u8,
+}
+
 const MAX_UPDATE_RETRIES: usize = 20;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+const CLEANUP_RETRIES: usize = 20;
 const PYTHON_VERSION: &str = "3.14.3";
+const DEFAULT_UV_PYTHON_INSTALL_MIRROR: &str =
+    "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download";
 const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
 fn default_deploy_config() -> &'static str {
@@ -140,7 +152,7 @@ fn alas_repo_dir() -> PathBuf {
     if fs::exists(installer_py).unwrap() {
         return exe_folder;
     }
-    // If it's MacOS, it could be ALAS.app/Contents/AzurLaneAutoScript
+    // If it's MacOS, it could be AzurPilot.app/Contents/AzurLaneAutoScript
     #[cfg(target_os = "macos")]
     {
         use std::ffi::OsStr;
@@ -153,7 +165,7 @@ fn alas_repo_dir() -> PathBuf {
             }
         }
     }
-    panic!("Cannot find ALAS repo folder");
+    panic!("Cannot find AzurPilot repo folder");
 }
 
 fn prepend_path_to_env(key: &str, path: PathBuf) {
@@ -179,7 +191,11 @@ fn venv_bin_dir() -> PathBuf {
 }
 
 pub fn venv_python() -> PathBuf {
-    venv_bin_dir().join(if cfg!(windows) { "python.exe" } else { "python" })
+    venv_bin_dir().join(if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python"
+    })
 }
 
 fn venv_python_install_dir() -> PathBuf {
@@ -224,7 +240,8 @@ fn bootstrap_uv_path() -> Result<PathBuf> {
             }
             bail!("启动器未内置 uv，且系统 PATH 中找不到 uv");
         }
-        fs::write(&path, BOOTSTRAP_UV)?;
+        fs::write(&path, BOOTSTRAP_UV)
+            .with_context(|| format!("写入内置 uv 到 {} 失败", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -256,7 +273,7 @@ fn find_on_path(executable: &str) -> Option<PathBuf> {
 
 pub fn setup_environment() -> Result<()> {
     let dir = alas_repo_dir();
-    info!("ALAS dir is {:?}", &dir);
+    info!("AzurPilot dir is {:?}", &dir);
     set_current_dir(&dir)?;
     prepend_path_to_env("PATH", venv_bin_dir());
     if cfg!(windows) {
@@ -286,32 +303,27 @@ fn setup_git_ca_bundle() {
     }
 }
 
-pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<()> {
-    info!("Starting setup for ALAS repository...");
+pub fn setup_alas_repo(
+    mut status_updater: impl FnMut(SplashUpdate),
+    cancel_requested: Arc<AtomicBool>,
+) -> Result<()> {
+    info!("Starting setup for AzurPilot repository...");
     #[cfg(target_os = "linux")]
     setup_git_ca_bundle();
     // Similar setup to deploy/installer.py
     status_updater(
-        SplashUpdate::loading(
-            "准备工作区",
-            "正在清理缓存并检查本地环境。",
-            8,
-        )
-        .with_subtitle(format!("检查本地环境中... | Tips：{}", get_tip())),
+        SplashUpdate::loading("准备工作区", "正在清理缓存并检查本地环境。", 8)
+            .with_subtitle(format!("检查本地环境中... | Tips：{}", get_tip())),
     );
     let bootstrap_uv = bootstrap_uv_path()?;
-    ensure_runtime_tools(&bootstrap_uv)?;
-    atomic_failure_cleanup("./config")?;
+    ensure_runtime_tools(&bootstrap_uv, &cancel_requested, &mut status_updater)?;
+    atomic_failure_cleanup("./config", &cancel_requested)?;
     migrate_dependency_config()?;
     status_updater(
-        SplashUpdate::loading(
-            "正在更新",
-            "正在获取最新补丁包",
-            18,
-        )
-        .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
+        SplashUpdate::loading("正在更新", "正在获取最新补丁包", 18)
+            .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
     );
-    git_update(&mut status_updater, &bootstrap_uv)?;
+    git_update(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
     status_updater(
         SplashUpdate::loading(
             "安装依赖库",
@@ -320,14 +332,10 @@ pub fn setup_alas_repo(mut status_updater: impl FnMut(SplashUpdate)) -> Result<(
         )
         .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
     );
-    uv_sync_project(&mut status_updater, &bootstrap_uv)?;
+    uv_sync_project(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
     status_updater(
-        SplashUpdate::loading(
-            "完成启动",
-            "本地界面已准备就绪，即将打开主窗口。",
-            94,
-        )
-        .with_subtitle(format!("启动服务中... | Tips：{}", get_tip())),
+        SplashUpdate::loading("完成启动", "本地界面已准备就绪，即将打开主窗口。", 94)
+            .with_subtitle(format!("启动服务中... | Tips：{}", get_tip())),
     );
     Ok(())
 }
@@ -336,6 +344,145 @@ pub fn get_deploy_config() -> Option<JsonValue> {
     let config_content = fs::read_to_string("./config/deploy.yaml").ok()?;
     let config: JsonValue = serde_yaml::from_str(&config_content).ok()?;
     Some(config)
+}
+
+pub fn cleanup_runtime_for_rebuild() -> Result<()> {
+    let repo_dir = alas_repo_dir();
+    let current_exe = std::env::current_exe()?;
+    let current_exe_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("alas-launcher.exe")
+        .to_ascii_lowercase();
+    let repo_dir = repo_dir.canonicalize()?;
+    let exe_dir = current_exe
+        .parent()
+        .ok_or_else(|| anyhow!("无法获取启动器所在目录"))?
+        .canonicalize()?;
+    if repo_dir != exe_dir {
+        bail!(
+            "拒绝清理非启动器目录：{} != {}",
+            repo_dir.display(),
+            exe_dir.display()
+        );
+    }
+
+    kill_runtime_processes(&repo_dir);
+
+    let mut failures = Vec::new();
+    for entry in fs::read_dir(&repo_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if should_keep_runtime_entry(&path, &current_exe_name) {
+            info!("Keeping {}", path.display());
+            continue;
+        }
+
+        info!("Removing {}", path.display());
+        if let Err(err) = remove_runtime_entry_with_retry(&path) {
+            failures.push(format!("{}: {err:#}", path.display()));
+        }
+    }
+
+    if !failures.is_empty() {
+        bail!("部分文件清理失败：\n{}", failures.join("\n"));
+    }
+
+    Ok(())
+}
+
+fn kill_runtime_processes(repo_dir: &Path) {
+    let current_pid = std::process::id();
+    let sys = sysinfo::System::new_all();
+    for (pid, process) in sys.processes() {
+        if pid.as_u32() == current_pid {
+            continue;
+        }
+
+        let should_kill = process
+            .exe()
+            .map(|exe| path_is_inside(exe, repo_dir))
+            .unwrap_or(false)
+            || process
+                .cwd()
+                .map(|cwd| path_is_inside(cwd, repo_dir))
+                .unwrap_or(false);
+
+        if should_kill {
+            info!(
+                "Killing runtime process {} ({}) before cleanup",
+                pid,
+                process.name().to_string_lossy()
+            );
+            if !process.kill() {
+                warn!("Failed to kill runtime process {}", pid);
+            }
+        }
+    }
+
+    thread::sleep(Duration::from_millis(500));
+}
+
+fn path_is_inside(path: &Path, parent: &Path) -> bool {
+    path.canonicalize()
+        .map(|path| path.starts_with(parent))
+        .unwrap_or(false)
+}
+
+fn should_keep_runtime_entry(path: &Path, current_exe_name: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "deploy" | "log" | "config" | "bootstrap" | "unins000.dat" | "unins000.exe"
+    ) || name == "alas-launcher.exe"
+        || name == current_exe_name
+}
+
+fn remove_runtime_entry(path: &Path) -> Result<()> {
+    clear_readonly(path)?;
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            remove_runtime_entry(&entry?.path())?;
+        }
+        fs::remove_dir(path).with_context(|| format!("删除目录失败：{}", path.display()))?;
+    } else {
+        fs::remove_file(path).with_context(|| format!("删除文件失败：{}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_runtime_entry_with_retry(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..CLEANUP_RETRIES {
+        match remove_runtime_entry(path) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if !path.exists() {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(250 + attempt as u64 * 100));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("删除失败：{}", path.display())))
+}
+
+fn clear_readonly(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(());
+    };
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("修改只读权限失败：{}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn pipe_lines(read: impl Read + Send + 'static, tx: Sender<(bool, String)>, is_err: bool) {
@@ -383,6 +530,7 @@ fn run_command(
     cmd: &mut Command,
     mut status_updater: impl FnMut(SplashUpdate),
     phase: ScriptPhase,
+    cancel_requested: &AtomicBool,
 ) -> Result<()> {
     let is_deps = matches!(phase, ScriptPhase::Dependencies { .. });
 
@@ -409,25 +557,53 @@ fn run_command(
     drop(tx);
 
     let mut last_err = "".to_owned();
+    let mut git_progress = GitProgressState::default();
     let mut seen_packages = HashSet::new();
+    let mut dependency_progress = 64u8;
+    let mut dependency_elapsed_secs = 0u16;
 
     // Receive lines and tee them to stdout/stderr and the status_updater callback.
-    while let Ok((is_err, line)) = rx.recv() {
-        if let Some(update) =
-            splash_update_for_output(&line, phase, &mut seen_packages)
-        {
-            status_updater(update);
+    loop {
+        if cancel_requested.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("启动已取消，正在清理环境");
         }
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok((is_err, line)) => {
+                if let Some(mut update) =
+                    splash_update_for_output(&line, phase, &mut git_progress, &mut seen_packages)
+                {
+                    if is_deps {
+                        update.progress = update.progress.max(dependency_progress);
+                        dependency_progress = update.progress;
+                    }
+                    status_updater(update);
+                }
 
-        if is_err {
-            if is_deps && is_uv_progress_line(&line) {
-                info!("{line}");
-            } else {
-                warn!("{line}");
-                last_err = line;
+                if is_err {
+                    if is_deps && is_uv_progress_line(&line) {
+                        info!("{line}");
+                    } else {
+                        warn!("{line}");
+                        last_err = line;
+                    }
+                } else {
+                    info!("{line}");
+                }
             }
-        } else {
-            info!("{line}");
+            Err(RecvTimeoutError::Timeout) => {
+                if is_deps {
+                    dependency_elapsed_secs = dependency_elapsed_secs.saturating_add(1);
+                    let update =
+                        dependency_wait_update(dependency_elapsed_secs, dependency_progress);
+                    dependency_progress = update.progress;
+                    status_updater(update);
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                break;
+            }
         }
     }
 
@@ -449,9 +625,19 @@ fn run_command_with_retry(
     build_cmd: impl Fn() -> Command,
     mut status_updater: impl FnMut(SplashUpdate),
     phase: ScriptPhase,
+    cancel_requested: &AtomicBool,
 ) -> Result<()> {
     for retry in 0..=MAX_UPDATE_RETRIES {
-        match run_command(&mut build_cmd(), &mut status_updater, phase) {
+        if cancel_requested.load(Ordering::SeqCst) {
+            bail!("启动已取消，正在清理环境");
+        }
+
+        match run_command(
+            &mut build_cmd(),
+            &mut status_updater,
+            phase,
+            cancel_requested,
+        ) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 if retry == MAX_UPDATE_RETRIES {
@@ -473,6 +659,34 @@ fn run_command_with_retry(
     unreachable!()
 }
 
+fn run_status_command(
+    cmd: &mut Command,
+    cancel_requested: &AtomicBool,
+) -> Result<std::process::ExitStatus> {
+    run_status_command_with_tick(cmd, cancel_requested, || {})
+}
+
+fn run_status_command_with_tick(
+    cmd: &mut Command,
+    cancel_requested: &AtomicBool,
+    mut on_tick: impl FnMut(),
+) -> Result<std::process::ExitStatus> {
+    let mut child = cmd.create_no_window().spawn()?;
+    loop {
+        if cancel_requested.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("启动已取消，正在清理环境");
+        }
+
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        on_tick();
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn phase_display_name(phase: ScriptPhase) -> &'static str {
     match phase {
         ScriptPhase::Git => "代码更新",
@@ -481,20 +695,34 @@ fn phase_display_name(phase: ScriptPhase) -> &'static str {
 }
 
 fn splash_retry_update(phase: ScriptPhase, retry_count: usize, error_text: &str) -> SplashUpdate {
-    let detail = format!(
-        "重试失败 ({retry_count}/{MAX_UPDATE_RETRIES})，1秒后再次尝试：{error_text}"
-    );
+    let detail =
+        format!("重试失败 ({retry_count}/{MAX_UPDATE_RETRIES})，1秒后再次尝试：{error_text}");
     match phase {
         ScriptPhase::Git => SplashUpdate::loading("正在更新 AzurPilot", detail, 18)
             .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
-        ScriptPhase::Dependencies { .. } => {
-            SplashUpdate::loading("安装依赖库", detail, 64)
-                .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip()))
-        }
+        ScriptPhase::Dependencies { .. } => SplashUpdate::loading("安装依赖库", detail, 64)
+            .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
     }
 }
 
-fn git_update(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path) -> Result<()> {
+fn dependency_wait_update(elapsed_secs: u16, current_progress: u8) -> SplashUpdate {
+    let synthetic_progress = (64 + (elapsed_secs / 4) as u8).min(89);
+    let progress = current_progress.max(synthetic_progress);
+    let detail = if elapsed_secs < 10 {
+        "uv 正在解析和同步依赖，请稍候。".to_owned()
+    } else {
+        format!("uv 正在同步依赖，已运行约 {elapsed_secs} 秒。")
+    };
+
+    SplashUpdate::loading("安装依赖库", detail, progress)
+        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip()))
+}
+
+fn git_update(
+    status_updater: impl FnMut(SplashUpdate),
+    bootstrap_uv: &Path,
+    cancel_requested: &AtomicBool,
+) -> Result<()> {
     // Decorate execute() to get fetch progress
     let script = r#"
 import deploy.git
@@ -519,22 +747,22 @@ gm.git_install()
         },
         status_updater,
         ScriptPhase::Git,
+        cancel_requested,
     )
 }
 
-fn uv_sync_project(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path) -> Result<()> {
+fn uv_sync_project(
+    status_updater: impl FnMut(SplashUpdate),
+    bootstrap_uv: &Path,
+    cancel_requested: &AtomicBool,
+) -> Result<()> {
     let mirror = deploy_pypi_mirror();
 
     let bootstrap_uv = bootstrap_uv.to_path_buf();
     run_command_with_retry(
         move || {
             let mut cmd = Command::new(&bootstrap_uv);
-            cmd.args([
-                "sync",
-                "--frozen",
-                "--no-dev",
-                "--no-install-project",
-            ])
+            cmd.args(["sync", "--frozen", "--no-dev", "--no-install-project"])
                 .env("UV_NO_PROGRESS", "1")
                 .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
             if let Some(ref m) = mirror {
@@ -544,6 +772,7 @@ fn uv_sync_project(status_updater: impl FnMut(SplashUpdate), bootstrap_uv: &Path
         },
         status_updater,
         ScriptPhase::Dependencies { total_packages: 0 },
+        cancel_requested,
     )
 }
 
@@ -639,22 +868,57 @@ fn migrate_dependency_config() -> Result<()> {
     Ok(())
 }
 
-fn atomic_failure_cleanup(path: &str) -> Result<()> {
-    let _ = Command::new(venv_python())
-        .args([
-            "-c",
-            "import sys; from deploy.atomic import atomic_failure_cleanup; atomic_failure_cleanup(sys.argv[1])",
-            path,
-        ])
-        .create_no_window()
-        .status()?;
+fn atomic_failure_cleanup(path: &str, cancel_requested: &AtomicBool) -> Result<()> {
+    let mut cmd = Command::new(venv_python());
+    cmd.args([
+        "-c",
+        "import sys; from deploy.atomic import atomic_failure_cleanup; atomic_failure_cleanup(sys.argv[1])",
+        path,
+    ]);
+    let _ = run_status_command(&mut cmd, cancel_requested)?;
     Ok(())
 }
 
-fn ensure_runtime_tools(bootstrap_uv: &Path) -> Result<()> {
-    ensure_self_contained_python(bootstrap_uv)?;
-    ensure_deploy_python_dependencies(bootstrap_uv)?;
+fn runtime_tools_update(title: &str, detail: impl Into<String>, progress: u8) -> SplashUpdate {
+    SplashUpdate::loading(title, detail, progress)
+        .with_subtitle(format!("重建运行环境中... | Tips：{}", get_tip()))
+}
 
+fn runtime_wait_update(
+    title: &str,
+    action: &str,
+    elapsed_ticks: u16,
+    start_progress: u8,
+    end_progress: u8,
+) -> SplashUpdate {
+    let elapsed_secs = elapsed_ticks / 10;
+    let progress = scale_progress(elapsed_secs.min(120) as u8, start_progress, end_progress);
+    let detail = if elapsed_secs < 8 {
+        format!("{action}，请稍候。")
+    } else {
+        format!("{action}，已运行约 {elapsed_secs} 秒。")
+    };
+    runtime_tools_update(title, detail, progress)
+}
+
+fn ensure_runtime_tools(
+    bootstrap_uv: &Path,
+    cancel_requested: &AtomicBool,
+    mut status_updater: impl FnMut(SplashUpdate),
+) -> Result<()> {
+    status_updater(runtime_tools_update(
+        "准备运行环境",
+        "正在检查内置 Python 和基础工具。",
+        9,
+    ));
+    ensure_self_contained_python(bootstrap_uv, cancel_requested, &mut status_updater)?;
+    ensure_deploy_python_dependencies(bootstrap_uv, cancel_requested, &mut status_updater)?;
+
+    status_updater(runtime_tools_update(
+        "准备运行环境",
+        "正在复制启动器运行所需工具。",
+        16,
+    ));
     copy_file_if_exists(bootstrap_uv, &venv_uv())?;
     ensure_adb_in_venv()?;
     ensure_git_in_venv()?;
@@ -672,16 +936,29 @@ fn deploy_pypi_mirror() -> Option<String> {
         .map(|m| m.to_owned())
 }
 
-fn ensure_deploy_python_dependencies(bootstrap_uv: &Path) -> Result<()> {
-    let status = Command::new(venv_python())
-        .args(["-c", "import requests"])
-        .create_no_window()
-        .status()?;
+fn ensure_deploy_python_dependencies(
+    bootstrap_uv: &Path,
+    cancel_requested: &AtomicBool,
+    mut status_updater: impl FnMut(SplashUpdate),
+) -> Result<()> {
+    status_updater(runtime_tools_update(
+        "准备运行环境",
+        "正在检查 deploy 基础依赖 requests。",
+        14,
+    ));
+    let mut import_check = Command::new(venv_python());
+    import_check.args(["-c", "import requests"]);
+    let status = run_status_command(&mut import_check, cancel_requested)?;
     if status.success() {
         return Ok(());
     }
 
     let mut cmd = Command::new(bootstrap_uv);
+    status_updater(runtime_tools_update(
+        "准备运行环境",
+        "正在安装 deploy 基础依赖 requests。",
+        15,
+    ));
     cmd.args(["pip", "install", "--python"])
         .arg(venv_python())
         .arg("requests")
@@ -690,7 +967,19 @@ fn ensure_deploy_python_dependencies(bootstrap_uv: &Path) -> Result<()> {
     if let Some(mirror) = deploy_pypi_mirror() {
         cmd.args(["--default-index", &mirror]);
     }
-    let status = cmd.create_no_window().status()?;
+    let mut elapsed_ticks = 0u16;
+    let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
+        elapsed_ticks = elapsed_ticks.saturating_add(1);
+        if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
+            status_updater(runtime_wait_update(
+                "准备运行环境",
+                "正在安装 deploy 基础依赖 requests",
+                elapsed_ticks,
+                15,
+                16,
+            ));
+        }
+    })?;
     if !status.success() {
         bail!("安装 deploy 基础依赖 requests 失败");
     }
@@ -700,24 +989,49 @@ fn ensure_deploy_python_dependencies(bootstrap_uv: &Path) -> Result<()> {
 fn uv_python_env(cmd: &mut Command) {
     cmd.env("UV_NO_PROGRESS", "1")
         .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+    if std::env::var_os("UV_PYTHON_INSTALL_MIRROR").is_none() {
+        cmd.env("UV_PYTHON_INSTALL_MIRROR", DEFAULT_UV_PYTHON_INSTALL_MIRROR);
+    }
 }
 
-fn ensure_self_contained_python(bootstrap_uv: &Path) -> Result<()> {
+fn ensure_self_contained_python(
+    bootstrap_uv: &Path,
+    cancel_requested: &AtomicBool,
+    mut status_updater: impl FnMut(SplashUpdate),
+) -> Result<()> {
+    status_updater(runtime_tools_update(
+        "准备运行环境",
+        format!("正在检查 Python {PYTHON_VERSION}。"),
+        10,
+    ));
     if venv_python_works() && managed_python_executable().is_some() {
         return Ok(());
     }
 
     if managed_python_executable().is_none() {
+        status_updater(runtime_tools_update(
+            "下载 Python",
+            format!("正在下载 Python {PYTHON_VERSION}，首次启动可能需要几分钟。"),
+            11,
+        ));
         let mut cmd = Command::new(bootstrap_uv);
-        cmd.args([
-            "python",
-            "install",
-            "--install-dir",
-        ])
+        cmd.args(["python", "install", "--install-dir"])
             .arg(venv_python_install_dir())
             .args(["--no-bin", "--managed-python", PYTHON_VERSION]);
         uv_python_env(&mut cmd);
-        let status = cmd.create_no_window().status()?;
+        let mut elapsed_ticks = 0u16;
+        let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
+            elapsed_ticks = elapsed_ticks.saturating_add(1);
+            if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
+                status_updater(runtime_wait_update(
+                    "下载 Python",
+                    &format!("正在下载 Python {PYTHON_VERSION}"),
+                    elapsed_ticks,
+                    11,
+                    13,
+                ));
+            }
+        })?;
         if !status.success() {
             bail!("下载 Python {PYTHON_VERSION} 失败");
         }
@@ -725,12 +1039,17 @@ fn ensure_self_contained_python(bootstrap_uv: &Path) -> Result<()> {
 
     let managed_python = managed_python_executable()
         .ok_or_else(|| anyhow!("找不到 .venv 内的 Python {PYTHON_VERSION}"))?;
+    status_updater(runtime_tools_update(
+        "创建虚拟环境",
+        "正在创建 .venv 并绑定内置 Python。",
+        13,
+    ));
     let mut cmd = Command::new(bootstrap_uv);
     cmd.args(["venv", "--allow-existing", "--relocatable", "--python"])
         .arg(managed_python)
         .arg(venv_dir());
     uv_python_env(&mut cmd);
-    let status = cmd.create_no_window().status()?;
+    let status = run_status_command(&mut cmd, cancel_requested)?;
     if !status.success() {
         bail!("创建 .venv 失败");
     }
@@ -751,7 +1070,10 @@ fn managed_python_executable() -> Option<PathBuf> {
         let candidates = if cfg!(windows) {
             vec![path.join("python.exe")]
         } else {
-            vec![path.join("bin").join("python3.14"), path.join("bin").join("python")]
+            vec![
+                path.join("bin").join("python3.14"),
+                path.join("bin").join("python"),
+            ]
         };
         for candidate in candidates {
             if candidate.exists() {
@@ -782,10 +1104,15 @@ fn copy_file_if_exists(from: &Path, to: &Path) -> Result<()> {
     if !from.exists() {
         return Ok(());
     }
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
+    if to.exists() && files_match(from, to).unwrap_or(false) {
+        return Ok(());
     }
-    fs::copy(from, to)?;
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建目录 {} 失败", parent.display()))?;
+    }
+    fs::copy(from, to)
+        .with_context(|| format!("复制文件失败：{} -> {}", from.display(), to.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -794,6 +1121,21 @@ fn copy_file_if_exists(from: &Path, to: &Path) -> Result<()> {
         fs::set_permissions(to, permissions)?;
     }
     Ok(())
+}
+
+fn files_match(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata =
+        fs::metadata(left).with_context(|| format!("读取文件信息失败：{}", left.display()))?;
+    let right_metadata =
+        fs::metadata(right).with_context(|| format!("读取文件信息失败：{}", right.display()))?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let left_bytes = fs::read(left).with_context(|| format!("读取文件失败：{}", left.display()))?;
+    let right_bytes =
+        fs::read(right).with_context(|| format!("读取文件失败：{}", right.display()))?;
+    Ok(left_bytes == right_bytes)
 }
 
 fn ensure_adb_in_venv() -> Result<()> {
@@ -883,6 +1225,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 fn splash_update_for_output(
     line: &str,
     phase: ScriptPhase,
+    git_progress: &mut GitProgressState,
     seen_packages: &mut HashSet<String>,
 ) -> Option<SplashUpdate> {
     let sanitized = line.trim();
@@ -891,32 +1234,87 @@ fn splash_update_for_output(
     }
 
     match phase {
-        ScriptPhase::Git => splash_update_for_git_output(sanitized),
+        ScriptPhase::Git => splash_update_for_git_output(sanitized, git_progress),
         ScriptPhase::Dependencies { total_packages } => {
             splash_update_for_dependency_output(sanitized, total_packages, seen_packages)
         }
     }
 }
 
-fn splash_update_for_git_output(line: &str) -> Option<SplashUpdate> {
+fn splash_update_for_git_output(line: &str, state: &mut GitProgressState) -> Option<SplashUpdate> {
+    let subtitle = format!("同步仓库中... | Tips：{}", get_tip());
+
     if line.contains("=====") {
         let detail = line.replace('=', " ");
-        return Some(
-            SplashUpdate::loading("正在更新 AzurPilot", detail.trim(), 24)
-                .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
-        );
+        let progress = git_section_progress(detail.trim()).unwrap_or(24);
+        return Some(git_update_splash(
+            line,
+            detail.trim(),
+            progress,
+            state,
+            subtitle,
+        ));
     }
 
-    if line.contains("objects:") || line.contains("deltas:") || line.contains("files:") {
-        let percentage = find_percentage(line).unwrap_or(0);
-        let progress = 18 + ((percentage as u16 * 42) / 100) as u8;
-        return Some(
-            SplashUpdate::loading("正在更新 AzurPilot", line, progress)
-                .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
-        );
+    if let Some(progress) = git_line_progress(line) {
+        return Some(git_update_splash(line, line, progress, state, subtitle));
     }
 
     None
+}
+
+fn git_update_splash(
+    raw_line: &str,
+    detail: &str,
+    progress: u8,
+    state: &mut GitProgressState,
+    subtitle: String,
+) -> SplashUpdate {
+    state.progress = state.progress.max(progress);
+    let display_detail = if detail.trim().is_empty() {
+        raw_line
+    } else {
+        detail
+    };
+    SplashUpdate::loading("正在更新 AzurPilot", display_detail, state.progress)
+        .with_subtitle(subtitle)
+}
+
+fn git_section_progress(section: &str) -> Option<u8> {
+    if section.contains("SHOW DEPLOY CONFIG") {
+        Some(18)
+    } else if section.contains("UPDATE AZURPILOT") {
+        Some(20)
+    } else if section.contains("GIT INIT") {
+        Some(22)
+    } else if section.contains("SET GIT PROXY") {
+        Some(23)
+    } else if section.contains("SET GIT REPOSITORY") {
+        Some(24)
+    } else if section.contains("FETCH REPOSITORY BRANCH") {
+        Some(25)
+    } else if section.contains("PULL REPOSITORY BRANCH") {
+        Some(58)
+    } else if section.contains("SHOW VERSION") {
+        Some(63)
+    } else {
+        None
+    }
+}
+
+fn git_line_progress(line: &str) -> Option<u8> {
+    let percentage = find_percentage(line)?;
+    if line.contains("Counting objects:") || line.contains("Compressing objects:") {
+        Some(scale_progress(percentage, 25, 29))
+    } else if line.contains("Receiving objects:") {
+        Some(scale_progress(percentage, 29, 52))
+    } else if line.contains("Resolving deltas:") {
+        Some(scale_progress(percentage, 52, 58))
+    } else if line.contains("Updating files:") {
+        Some(scale_progress(percentage, 58, 62))
+    } else {
+        None
+    }
 }
 
 fn splash_update_for_dependency_output(
@@ -985,7 +1383,11 @@ fn extract_uv_package_name(line: &str) -> Option<String> {
         .or_else(|| rest.split_once(" (").map(|(n, _)| n))
         .unwrap_or(rest);
     let name = name.trim().to_ascii_lowercase();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn uv_download_progress(downloaded: usize, total: usize) -> u8 {
@@ -995,7 +1397,14 @@ fn uv_download_progress(downloaded: usize, total: usize) -> u8 {
     let clamped = downloaded.min(total) as u16;
     let total = total as u16;
     // 72-82% range for downloads
-    (72 + ((clamped * 10) / total) as u8).min(82)
+    scale_progress(((clamped * 100) / total) as u8, 72, 82)
+}
+
+fn scale_progress(percentage: u8, start: u8, end: u8) -> u8 {
+    let percentage = percentage.min(100) as u16;
+    let start = start as u16;
+    let end = end as u16;
+    (start + ((percentage * (end - start)) / 100)) as u8
 }
 
 fn find_percentage(s: &str) -> Option<u8> {
@@ -1022,5 +1431,32 @@ mod tests {
         assert_eq!(Some(25), find_percentage("loading 25%..."));
         assert_eq!(Some(100), find_percentage("100%..."));
         assert_eq!(None, find_percentage("%1"));
+    }
+
+    #[test]
+    fn test_git_line_progress_ranges() {
+        assert_eq!(
+            Some(25),
+            git_line_progress("remote: Counting objects:   1% (1/66)")
+        );
+        assert_eq!(
+            Some(40),
+            git_line_progress("Receiving objects:  50% (43546/87092), 179.10 MiB | 5.03 MiB/s")
+        );
+        assert_eq!(
+            Some(58),
+            git_line_progress("Resolving deltas: 100% (66157/66157), done.")
+        );
+        assert_eq!(
+            Some(62),
+            git_line_progress("Updating files: 100% (9881/9881), done.")
+        );
+    }
+
+    #[test]
+    fn test_git_section_progress_ranges() {
+        assert_eq!(Some(25), git_section_progress("FETCH REPOSITORY BRANCH"));
+        assert_eq!(Some(58), git_section_progress("PULL REPOSITORY BRANCH"));
+        assert_eq!(Some(63), git_section_progress("SHOW VERSION"));
     }
 }

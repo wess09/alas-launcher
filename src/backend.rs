@@ -11,8 +11,8 @@ use command_group::{CommandGroup, GroupChild};
 use serde_json::Value as JsonValue;
 use tracing::{info, warn};
 
-use crate::window_util::CreateNoWindow as _;
 use crate::setup::venv_python;
+use crate::window_util::CreateNoWindow as _;
 
 #[derive(Clone, Debug)]
 pub struct WebuiLaunchConfig {

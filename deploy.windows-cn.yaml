@@ -1,15 +1,14 @@
 Deploy:
   Git:
     # URL of AzurLaneAutoScript repository
-    # [CN user] Use 'https://git.nanoda.work/git/AzurLaneAutoScript' for faster and more stable download
-    # [Other] Use 'https://git.nanoda.work/git/AzurLaneAutoScript'
-    Repository: https://git.nanoda.work/git/AzurLaneAutoScript
+    # [CN user] Use 'git://git.pull/AzurPilot' for faster and more stable download
+    # [Other] Use 'https://github.com/wess09/AzurPilot'
+    Repository: git://git.pull/AzurPilot
     # Branch of Alas
     # [Developer] Use 'dev', 'app', etc, to try new features
     # [Other] Use 'master', the stable branch
     Branch: master
-    # Filepath of git executable `git.exe`
-    # [Other] Use you own git
+    # Filepath of git executable.
     GitExecutable: ./.venv/Scripts/git/cmd/git.exe
     # Set git proxy
     # [CN user] Use your local http proxy (http://127.0.0.1:{port}) or socks5 proxy (socks5://127.0.0.1:{port})
@@ -22,15 +21,9 @@ Deploy:
     # Update Alas at startup
     # [In most cases] Use true
     AutoUpdate: true
-    # Whether to keep local changes during update
-    # User settings, logs and screenshots will be kept, no mather this is true or false
-    # [Developer] Use true, if you modified the code
-    # [Other] Use false
-    KeepLocalChanges: false
 
   Python:
-    # Filepath of python executable `python.exe`
-    # [Other] Use your own python, and its version should be 3.14.3 64bit
+    # Filepath of python executable.
     PythonExecutable: ./.venv/Scripts/python.exe
     # URL of pypi mirror
     # [CN user] Use 'https://mirrors.aliyun.com/pypi/simple' for faster and more stable download
@@ -41,8 +34,7 @@ Deploy:
     InstallDependencies: true
 
   Adb:
-    # Filepath of ADB executable `adb.exe`
-    # [Other] Use you own latest ADB, but not the ADB in your emulator
+    # Filepath of ADB executable.
     AdbExecutable: ./.venv/Scripts/adb.exe
     # Whether to replace ADB
     # Chinese emulators (NoxPlayer, LDPlayer, MemuPlayer, MuMuPlayer) use their own ADB, instead of the latest.
@@ -54,7 +46,7 @@ Deploy:
     #   3. Brute-force connect to all available emulator instances
     # [In most cases] Use true
     # [In few cases] Use false, if you have other programs using ADB.
-    ReplaceAdb: false
+    ReplaceAdb: true
     # Brute-force connect to all available emulator instances
     # [In most cases] Use true
     AutoConnect: true
@@ -80,7 +72,7 @@ Deploy:
 
   Update:
     # Use auto update and builtin updater feature
-    # This may cause problem https://github.com/LmeSzinc/AzurLaneAutoScript/issues/876
+    # This may cause problem https://github.com/wess09/AzurPilot/issues/876
     EnableReload: true
     # Check update every X minute
     # [Disable] 0
@@ -150,3 +142,11 @@ Deploy:
     # '["alas"]' specified "alas" config
     # '["alas","alas2"]' specified "alas" "alas2" configs
     Run: null
+    # SSL support
+    # Only effective when both parameters below are set
+    # --ssl-key. Path to SSL key file
+    # [Default] null (no SSL)
+    WebuiSSLKey: null
+    # --ssl-cert. Path to SSL cert file
+    # [Default] null (no SSL)
+    WebuiSSLCert: null

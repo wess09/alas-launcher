@@ -165,13 +165,13 @@ fn show_notification(
             ("有新的公告喵~".to_owned(), NotificationType::Announcement)
         } else {
             (
-                clean_text(title).unwrap_or_else(|| "Alas".to_owned()),
+                clean_text(title).unwrap_or_else(|| "AzurPilot".to_owned()),
                 NotificationType::Normal,
             )
         }
     } else {
         (
-            clean_text(title).unwrap_or_else(|| "Alas".to_owned()),
+            clean_text(title).unwrap_or_else(|| "AzurPilot".to_owned()),
             NotificationType::Normal,
         )
     };
@@ -258,7 +258,7 @@ fn ensure_windows_app_user_model_id(id: &str, name: &str) -> Result<PathBuf> {
 fn ensure_windows_notification_icon() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir()
         .ok_or_else(|| anyhow!("Unable to resolve local app data directory"))?
-        .join("AlasLauncher");
+        .join("AzurPilotLauncher");
     fs::create_dir_all(&data_dir)?;
 
     let icon_path = data_dir.join("notification-icon.png");
@@ -311,12 +311,12 @@ mod tests {
     #[test]
     fn parses_notify_payload() {
         let payload: NotifyPayload = serde_json::from_str(
-            r#"{"instance":"alas","title":"Alas <alas> 警告","content":"<alas> 游戏卡住"}"#,
+            r#"{"instance":"alas","title":"AzurPilot <alas> 警告","content":"<alas> 游戏卡住"}"#,
         )
         .unwrap();
 
         assert_eq!(payload.instance.as_deref(), Some("alas"));
-        assert_eq!(payload.title.as_deref(), Some("Alas <alas> 警告"));
+        assert_eq!(payload.title.as_deref(), Some("AzurPilot <alas> 警告"));
         assert_eq!(payload.content.as_deref(), Some("<alas> 游戏卡住"));
     }
 }

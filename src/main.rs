@@ -15,12 +15,13 @@ use std::{
         Arc, Mutex,
     },
     thread::{self},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
-use chrono::Local;
+use chrono::{DateTime, FixedOffset, Local, Utc};
+use reqwest::header::DATE;
 use serde_json::to_string;
 use tauri::{
     image::Image,
@@ -40,7 +41,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use crate::{
     backend::{ManagedBackend, WebuiLaunchConfig},
     notify::{start_notify_stream, NotificationClickHandler},
-    setup::{get_deploy_config, setup_alas_repo, setup_environment, SplashUpdate},
+    setup::{
+        cleanup_runtime_for_rebuild, get_deploy_config, setup_alas_repo, setup_environment,
+        SplashUpdate,
+    },
 };
 
 #[cfg(target_os = "macos")]
@@ -60,6 +64,14 @@ const BACKEND_ERROR_URL_BASE: &str = "alas-error://localhost/backend";
 const SPLASH_URL: &str = "http://alas-splash.localhost/";
 #[cfg(not(any(windows, target_os = "android")))]
 const SPLASH_URL: &str = "alas-splash://localhost/";
+const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
+
+#[derive(Clone, Debug)]
+struct TimeBombConfig {
+    expires_at: DateTime<FixedOffset>,
+    network_time_url: String,
+    message: String,
+}
 
 #[cfg(target_os = "macos")]
 fn tray_icon_for_platform() -> Image<'static> {
@@ -88,6 +100,186 @@ fn tray_icon_for_platform() -> Image<'static> {
     })
 }
 
+fn begin_startup_cleanup(
+    app_handle: tauri::AppHandle,
+    allow_exit: Arc<AtomicBool>,
+    setup_cancel_requested: Arc<AtomicBool>,
+    setup_running: Arc<AtomicBool>,
+    startup_cleanup_started: Arc<AtomicBool>,
+) {
+    if startup_cleanup_started
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    setup_cancel_requested.store(true, Ordering::SeqCst);
+    if let Some(splash) = app_handle.get_webview_window("splash") {
+        update_splash(
+            &splash,
+            &SplashUpdate::loading(
+                "正在清理环境",
+                "正在移除未完成的启动环境，下次启动会自动完全重建。",
+                99,
+            )
+            .with_subtitle("请稍候，不要手动删除文件。"),
+        );
+    }
+
+    app_handle
+        .dialog()
+        .message("正在清理环境，下次启动将自动完全重建。")
+        .title("正在清理环境")
+        .show(|_| {});
+
+    thread::spawn(move || {
+        let started_at = Instant::now();
+        while setup_running.load(Ordering::SeqCst) && started_at.elapsed() < Duration::from_secs(30)
+        {
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        if setup_running.load(Ordering::SeqCst) {
+            warn!("Setup thread did not stop before startup cleanup timeout");
+        }
+
+        match cleanup_runtime_for_rebuild() {
+            Ok(()) => {
+                info!("Startup cleanup finished; runtime will be rebuilt on next launch");
+            }
+            Err(e) => {
+                error!("Startup cleanup failed: {:?}", e);
+                if let Some(splash) = app_handle.get_webview_window("splash") {
+                    update_splash(
+                        &splash,
+                        &SplashUpdate::error(
+                            "清理失败",
+                            format!("部分文件仍被占用或无法删除，请关闭相关进程后重试。\n\n{e:#}"),
+                            99,
+                        ),
+                    );
+                }
+                startup_cleanup_started.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+
+        allow_exit.store(true, Ordering::SeqCst);
+        app_handle.exit(0);
+    });
+}
+
+fn time_bomb_config() -> Result<Option<TimeBombConfig>> {
+    let Some(section) = cargo_toml_section("package.metadata.alas-launcher.time-bomb") else {
+        return Ok(None);
+    };
+    let enabled = cargo_toml_value(section, "enabled")
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+
+    let expires_at = cargo_toml_value(section, "expires-at")
+        .ok_or_else(|| anyhow!("time-bomb.expires-at 未配置"))?;
+    let expires_at = DateTime::parse_from_rfc3339(&expires_at)
+        .map_err(|err| anyhow!("time-bomb.expires-at 格式错误：{err}"))?;
+    let network_time_url = cargo_toml_value(section, "network-time-url")
+        .unwrap_or_else(|| "http://www.gstatic.com/generate_204".to_owned());
+    let message = cargo_toml_value(section, "message")
+        .unwrap_or_else(|| "测试已结束，请安装正式版".to_owned());
+
+    Ok(Some(TimeBombConfig {
+        expires_at,
+        network_time_url,
+        message,
+    }))
+}
+
+fn cargo_toml_section(section_name: &str) -> Option<&'static str> {
+    let header = format!("[{section_name}]");
+    let start = TIME_BOMB_CONFIG_SOURCE.find(&header)? + header.len();
+    let rest = &TIME_BOMB_CONFIG_SOURCE[start..];
+    let end = rest.find("\n[").unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+fn cargo_toml_value(section: &str, key: &str) -> Option<String> {
+    for line in section.lines() {
+        let line = line
+            .split_once('#')
+            .map(|(left, _)| left)
+            .unwrap_or(line)
+            .trim();
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if left.trim() != key {
+            continue;
+        }
+        let value = right.trim();
+        return Some(
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(value)
+                .to_owned(),
+        );
+    }
+    None
+}
+
+fn time_bomb_expiration_message() -> Result<Option<String>> {
+    let Some(config) = time_bomb_config()? else {
+        return Ok(None);
+    };
+    let network_time = fetch_network_time(&config.network_time_url)?;
+    if network_time >= config.expires_at.with_timezone(&Utc) {
+        Ok(Some(config.message))
+    } else {
+        Ok(None)
+    }
+}
+
+fn fetch_network_time(url: &str) -> Result<DateTime<Utc>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = client.get(url).send()?;
+    let date_header = response
+        .headers()
+        .get(DATE)
+        .ok_or_else(|| anyhow!("网络时间响应缺少 Date 头"))?
+        .to_str()?;
+    Ok(DateTime::parse_from_rfc2822(date_header)?.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_bomb_config_parses_when_enabled() {
+        let section =
+            cargo_toml_section("package.metadata.alas-launcher.time-bomb").expect("section exists");
+        let enabled = cargo_toml_value(section, "enabled").as_deref() == Some("true");
+        let config = time_bomb_config().expect("time bomb config parses");
+        assert_eq!(config.is_some(), enabled);
+    }
+
+    #[test]
+    fn test_cargo_toml_value_reads_time_bomb_fields() {
+        let section =
+            cargo_toml_section("package.metadata.alas-launcher.time-bomb").expect("section exists");
+        assert!(cargo_toml_value(section, "expires-at").is_some());
+        assert_eq!(
+            Some("测试已结束，请安装正式版".to_owned()),
+            cargo_toml_value(section, "message")
+        );
+    }
+}
+
 /// Set macOS activation policy to Regular (show in dock) or Accessory (hide from dock).
 #[cfg(target_os = "macos")]
 fn set_macos_activation_policy(app: &tauri::AppHandle, regular: bool) {
@@ -112,7 +304,7 @@ fn main() -> Result<()> {
     setup_environment()?;
     let _log_guard = initialize_logging()?;
 
-    info!("=== Alas Launcher starting ===");
+    info!("=== AzurPilot starting ===");
     info!("Launcher log file: log/{}", today_launcher_log_filename());
 
     let deploy_config = get_deploy_config();
@@ -124,14 +316,21 @@ fn main() -> Result<()> {
 
     let backend = Arc::new(Mutex::new(None));
     let allow_exit = Arc::new(AtomicBool::new(false));
+    let launch_blocked = Arc::new(AtomicBool::new(false));
+    let setup_cancel_requested = Arc::new(AtomicBool::new(false));
+    let setup_running = Arc::new(AtomicBool::new(false));
+    let setup_completed = Arc::new(AtomicBool::new(false));
+    let startup_cleanup_started = Arc::new(AtomicBool::new(false));
     let recreating_main_window = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
     let close_prompt_active = Arc::new(AtomicBool::new(false));
 
     let allow_exit_for_setup = allow_exit.clone();
+    let launch_blocked_for_setup = launch_blocked.clone();
     let recreating_main_window_for_single_instance = recreating_main_window.clone();
     let recreating_main_window_for_setup = recreating_main_window.clone();
     let recreating_main_window_for_run = recreating_main_window.clone();
+    let launch_blocked_for_run = launch_blocked.clone();
     #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
@@ -163,6 +362,25 @@ fn main() -> Result<()> {
             );
         }))
         .setup(move |app| {
+            match time_bomb_expiration_message() {
+                Ok(Some(message)) => {
+                    launch_blocked_for_setup.store(true, Ordering::SeqCst);
+                    allow_exit_for_setup.store(true, Ordering::SeqCst);
+                    let app_handle = app.handle().clone();
+                    app.dialog()
+                        .message(message)
+                        .title("测试已结束")
+                        .show(move |_| {
+                            app_handle.exit(0);
+                        });
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!("Unable to verify test expiration time: {:?}", err);
+                }
+            }
+
             create_main_window(&app.handle(), port)?;
 
             // Windows and macOS: create system tray
@@ -258,6 +476,11 @@ fn main() -> Result<()> {
         .run(move |app_handle, event| {
             match event {
                 tauri::RunEvent::Ready => {
+                    if launch_blocked_for_run.load(Ordering::SeqCst) {
+                        debug!("Launch blocked by test expiration");
+                        return;
+                    }
+
                     debug!("RunEvent::Ready");
                     let allow_exit = allow_exit.clone();
                     let allow_exit_for_ctrlc = allow_exit.clone();
@@ -269,12 +492,17 @@ fn main() -> Result<()> {
                     let app_handle = app_handle.clone();
                     let backend = backend.clone();
                     let webui_config = webui_config.clone();
+                    let setup_cancel_requested = setup_cancel_requested.clone();
+                    let setup_running = setup_running.clone();
+                    let setup_completed = setup_completed.clone();
                     let recreating_main_window_for_notify = recreating_main_window_for_run.clone();
                     thread::spawn(move || {
+                        setup_running.store(true, Ordering::SeqCst);
                         let splash = app_handle.get_webview_window("splash").unwrap();
                         initialize_splash(&splash);
                         let last_progress = Cell::new(0u8);
-                        let mut status_updater = |update: SplashUpdate| {
+                        let mut status_updater = |mut update: SplashUpdate| {
+                            update.progress = update.progress.max(last_progress.get());
                             last_progress.set(update.progress);
                             update_splash(&splash, &update);
                         };
@@ -284,8 +512,14 @@ fn main() -> Result<()> {
                             "本地 Web 界面正在初始化，准备就绪后将自动打开窗口。",
                             4,
                         ).with_subtitle(format!("正在初始化... | Tips:{}", crate::setup::get_tip())));
-                        if let Err(e) = setup_alas_repo(&mut status_updater) {
+                        if let Err(e) =
+                            setup_alas_repo(&mut status_updater, setup_cancel_requested.clone())
+                        {
                             error!("{e}");
+                            setup_running.store(false, Ordering::SeqCst);
+                            if setup_cancel_requested.load(Ordering::SeqCst) {
+                                return;
+                            }
                             status_updater(SplashUpdate::error(
                                 "启动失败",
                                 format!(
@@ -306,6 +540,7 @@ fn main() -> Result<()> {
                             Ok(backend) => backend,
                             Err(e) => {
                                 error!("{e}");
+                                setup_running.store(false, Ordering::SeqCst);
                                 status_updater(SplashUpdate::error(
                                     "启动失败",
                                     format!(
@@ -350,9 +585,25 @@ fn main() -> Result<()> {
                             error!("Failed to navigate main window: {:?}", e);
                         }
                         reveal_window(&window).unwrap();
+                        setup_completed.store(true, Ordering::SeqCst);
+                        setup_running.store(false, Ordering::SeqCst);
                     });
                 }
                 tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !setup_completed.load(Ordering::SeqCst)
+                        && !startup_cleanup_started.load(Ordering::SeqCst)
+                    {
+                        api.prevent_exit();
+                        begin_startup_cleanup(
+                            app_handle.clone(),
+                            allow_exit.clone(),
+                            setup_cancel_requested.clone(),
+                            setup_running.clone(),
+                            startup_cleanup_started.clone(),
+                        );
+                        return;
+                    }
+
                     let should_allow = allow_exit.load(Ordering::SeqCst);
                     debug!("ExitRequested event: allow_exit={}", should_allow);
 
@@ -382,6 +633,18 @@ fn main() -> Result<()> {
                 }
                 tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
                     debug!("Window {} close requested", label);
+
+                    if label == "splash" && !setup_completed.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        begin_startup_cleanup(
+                            app_handle.clone(),
+                            allow_exit.clone(),
+                            setup_cancel_requested.clone(),
+                            setup_running.clone(),
+                            startup_cleanup_started.clone(),
+                        );
+                        return;
+                    }
 
                     if label == "splash" && !allow_exit.load(Ordering::SeqCst) {
                         api.prevent_close();
@@ -1195,11 +1458,19 @@ fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
     min-width: 0;
   }}
   .brand-text strong {{
-    display: block;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 7px;
     font-size: 15px;
     font-weight: 500;
     color: var(--color-text-primary);
     margin-bottom: 2px;
+  }}
+  .launcher-version {{
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    font-variant-numeric: tabular-nums;
   }}
   .brand-text span {{
     font-size: 12px;
@@ -1409,8 +1680,8 @@ fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
     <div class="card">
       <div class="card-header">
         <div class="brand-text">
-          <strong>AzurPilot</strong>
-          <span id="subtitle"></span>
+          <strong>AzurPilot <span class="launcher-version">v{launcher_version}</span></strong>
+          <span id="subtitle">正在初始化...</span>
         </div>
         <div id="badge" class="badge">正在加载</div>
       </div>
@@ -1419,17 +1690,17 @@ fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
         <div id="spinner" class="spinner"></div>
         <div id="error-dot" class="err-dot" style="display:none;">!</div>
         <div class="status-body">
-          <h2 id="title"></h2>
-          <p id="detail"></p>
+          <h2 id="title">正在启动</h2>
+          <p id="detail">本地 Web 界面正在初始化，准备就绪后将自动打开窗口。</p>
         </div>
       </div>
       <div class="prog-wrap">
         <div class="prog-track">
-          <div id="progress-fill" class="prog-fill" style="width: 0%;"></div>
+          <div id="progress-fill" class="prog-fill" style="width: 4%;"></div>
         </div>
         <div class="prog-meta">
           <span id="progress-meta" class="prog-meta-main">准备就绪后将自动打开窗口</span>
-          <span id="progress-pct" class="prog-pct">0%</span>
+          <span id="progress-pct" class="prog-pct">4%</span>
         </div>
         <div id="splash-actions" class="splash-actions">
           <button id="splash-log-button" class="splash-log-button" type="button">下载启动器日志</button>
@@ -1507,6 +1778,7 @@ fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
         dark_bg = dark_bg_b64,
         splash_script = splash_script,
         splash_titlebar = splash_titlebar,
+        launcher_version = env!("CARGO_PKG_VERSION"),
     );
 
     html

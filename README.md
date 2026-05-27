@@ -1,12 +1,12 @@
 **| [English](README_en.md) | 简体中文 |**
 
-ALAS Launcher: 一种新型的 [AzurLaneAutoScript](https://github.com/LmeSzinc/AzurLaneAutoScript) 启动器
+AzurPilot: 一种新型的 [AzurLaneAutoScript](https://github.com/LmeSzinc/AzurLaneAutoScript) 启动器
 ===
-故事背景：自从用上了 Mac Mini，PC 的开机键都懒得去按了。但是不开个 ALAS 怎么都不舒服不是……
+故事背景：自从用上了 Mac Mini，PC 的开机键都懒得去按了。但是不开个 AzurPilot 怎么都不舒服不是……
 
 前人大佬 binss 写的[这篇博客](https://www.binss.me/blog/run-azurlaneautoscript-on-arm64/)给了很多启发，
 但这篇文章里用的方法不是走了转译就是多少要套层 docker。作为一个原生主义者，我实在不想套层壳跑用户端程序，
-也不想把系统环境搞得乱七八糟。所以为什么不能，在MacOS，在林檎硅上，原生的，把 ALAS 给跑起来呢？
+也不想把系统环境搞得乱七八糟。所以为什么不能，在MacOS，在林檎硅上，原生的，把 AzurPilot 给跑起来呢？
 
 于是就有了这个 Repo。
 
@@ -14,12 +14,12 @@ ALAS Launcher: 一种新型的 [AzurLaneAutoScript](https://github.com/LmeSzinc/
 ---
 去右边 Releases 里，下载你对应系统和 CPU 的压缩包，解压。
 - Windows: 打开 `alas-launcher.exe`。如果使用 Windows 7, 8 或 10，请确保已经安装 [WebView2](https://developer.microsoft.com/zh-cn/microsoft-edge/webview2)
-- MacOS: 打开 `AzurLaneAutoScript.app`。如果报错则需要先打开终端，运行 `xattr -dr com.apple.quarantine AzurLaneAutoScript.app` （因为我没有林檎开发者给程序签名）
-- Linux: 打开 `alas-launcher`。注意程序依赖 `libwebkit2gtk-4.1` 和较新的 `glibc` （用 Ubuntu 22.04 跑的 CI）。如果没有，可能这启动器没法跑，但是 ALAS 本体跑起来应该没问题的
+- MacOS: 打开 `AzurPilot.app`。如果报错则需要先打开终端，运行 `xattr -dr com.apple.quarantine AzurPilot.app` （因为我没有林檎开发者给程序签名）
+- Linux: 打开 `alas-launcher`。注意程序依赖 `libwebkit2gtk-4.1` 和较新的 `glibc` （用 Ubuntu 22.04 跑的 CI）。如果没有，可能这启动器没法跑，但是 AzurPilot 本体跑起来应该没问题的
 
 许可协议
 ---
-因为 ALAS 用 GPLv3 所以咱也用 GPLv3。依赖软件大多是Apache2，BSD3啥的，请自行去上游找吧。。。
+因为 AzurPilot 用 GPLv3 所以咱也用 GPLv3。依赖软件大多是Apache2，BSD3啥的，请自行去上游找吧。。。
 
 截图
 ---
@@ -46,14 +46,14 @@ ALAS Launcher: 一种新型的 [AzurLaneAutoScript](https://github.com/LmeSzinc/
 
 目录结构
 ---
-ALAS 根目录
+AzurPilot 根目录
 * Windows: AzurLaneAutoScript
-* MacOS: AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
+* MacOS: AzurPilot.app/Contents/AzurLaneAutoScript
 * Linux: AzurLaneAutoScript
 
-ALAS 启动器
+AzurPilot 启动器
 * Windows: AzurLaneAutoScript/alas-launcher.exe
-* MacOS: AzurLaneAutoScript.app/Contents/MacOS/alas-launcher
+* MacOS: AzurPilot.app/Contents/MacOS/alas-launcher
 * Linux: AzurLaneAutoScript/alas-launcher
 
 Python / uv

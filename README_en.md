@@ -1,11 +1,11 @@
 **| English | [简体中文](README.md) |**
 
-ALAS Launcher: A New Type of [AzurLaneAutoScript](https://github.com/LmeSzinc/AzurLaneAutoScript) Launcher
+AzurPilot: A New Type of [AzurLaneAutoScript](https://github.com/LmeSzinc/AzurLaneAutoScript) Launcher
 ===
-Background: Since getting a Mac Mini, I've been too lazy to press the power button on my PC. But it feels wrong not running ALAS...
+Background: Since getting a Mac Mini, I've been too lazy to press the power button on my PC. But it feels wrong not running AzurPilot...
 
 This [blog post](https://www.binss.me/blog/run-azurlaneautoscript-on-arm64/) by binss was very inspiring,
-but the methods used either rely on translation layer or Docker containers. As a native purist, I really don't want to run user applications in containers, nor do I want to mess up my system environment. So why not run ALAS natively on MacOS, on Apple Silicon?
+but the methods used either rely on translation layer or Docker containers. As a native purist, I really don't want to run user applications in containers, nor do I want to mess up my system environment. So why not run AzurPilot natively on MacOS, on Apple Silicon?
 
 Thus this repo was born.
 
@@ -13,12 +13,12 @@ Simple Usage Instructions
 ---
 Go to Releases on the right, download the archive for your system and CPU architecture, and extract it.
 - Windows: Run `alas-launcher.exe`. If using Windows 7, 8, or 10, please make sure [WebView2](https://developer.microsoft.com/en-us/Microsoft-edge/webview2) is installed
-- MacOS: Open `AzurLaneAutoScript.app`. If there's an error, open Terminal and run `xattr -dr com.apple.quarantine AzurLaneAutoScript.app` (because I don't have an Apple developer certificate to sign the program)
-- Linux: Run `alas-launcher`. Note that the program depends on `libwebkit2gtk-4.1` and a recent `glibc` (CI runs on Ubuntu 22.04). If you don't have these, the launcher might not work, but ALAS itself should run fine
+- MacOS: Open `AzurPilot.app`. If there's an error, open Terminal and run `xattr -dr com.apple.quarantine AzurPilot.app` (because I don't have an Apple developer certificate to sign the program)
+- Linux: Run `alas-launcher`. Note that the program depends on `libwebkit2gtk-4.1` and a recent `glibc` (CI runs on Ubuntu 22.04). If you don't have these, the launcher might not work, but AzurPilot itself should run fine
 
 License
 ---
-Since ALAS uses GPLv3, we use GPLv3 too. Most dependencies use Apache2, BSD3, etc. - please check upstream repos for details.
+Since AzurPilot uses GPLv3, we use GPLv3 too. Most dependencies use Apache2, BSD3, etc. - please check upstream repos for details.
 
 Screenshots
 ---
@@ -45,14 +45,14 @@ Technical Details
 
 Directory Structure
 ---
-ALAS Root Directory
+AzurPilot Root Directory
 * Windows: AzurLaneAutoScript
-* MacOS: AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
+* MacOS: AzurPilot.app/Contents/AzurLaneAutoScript
 * Linux: AzurLaneAutoScript
 
-ALAS Launcher
+AzurPilot
 * Windows: AzurLaneAutoScript/alas-launcher.exe
-* MacOS: AzurLaneAutoScript.app/Contents/MacOS/alas-launcher
+* MacOS: AzurPilot.app/Contents/MacOS/alas-launcher
 * Linux: AzurLaneAutoScript/alas-launcher
 
 Python / uv

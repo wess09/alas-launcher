@@ -1,7 +1,7 @@
 [package]
 name = "alas-launcher"
-version = "1.6.2"
-description = "New ALAS launcher built with Tauri"
+version = "1.6.3test"
+description = "AzurPilot launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
 edition = "2021"
 
@@ -26,6 +26,12 @@ tauri-plugin-notification = "=2.0.0"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 ctrlc = "3.5.0"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+
+[package.metadata.alas-launcher.time-bomb]
+enabled = true
+expires-at = "2026-05-28T00:00:00+08:00"
+network-time-url = "https://www.aliyun.com"
+message = "测试已结束，请安装正式版"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }

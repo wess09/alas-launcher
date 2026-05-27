@@ -1,4 +1,4 @@
-name: Pack alas-launcher
+name: Pack AzurPilot
 
 on:
   push:
@@ -118,7 +118,7 @@ jobs:
           windows: |
             curl -L -o adb.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
             tar -xvf adb.zip
-      - name: Get ALAS
+      - name: Get AzurPilot
         run: |
           git clone --depth=1 --filter=blob:none --sparse https://github.com/wess09/AzurPilot.git AzurLaneAutoScript
           git -C AzurLaneAutoScript sparse-checkout set deploy
@@ -127,7 +127,7 @@ jobs:
         with:
           macos: |
             set -eux
-            rm -rf package-root AzurLaneAutoScript.app
+            rm -rf package-root AzurPilot.app
             mkdir -p package-root/AzurLaneAutoScript
             ditto AzurLaneAutoScript/deploy package-root/AzurLaneAutoScript/deploy
 
@@ -159,24 +159,24 @@ jobs:
             GIT_EXEC_PATH="$PWD/.venv/libexec/git-core" GIT_TEMPLATE_DIR="$PWD/.venv/share/git-core/templates" .venv/bin/git ls-remote https://github.com/git/git.git HEAD
 
             cd ${{ github.workspace }}
-            mkdir -p AzurLaneAutoScript.app/Contents/MacOS
-            cp target/release/alas-launcher AzurLaneAutoScript.app/Contents/MacOS/
-            mkdir -p AzurLaneAutoScript.app/Contents/Resources
-            cp icons/icon.icns AzurLaneAutoScript.app/Contents/Resources/
-            ditto package-root/AzurLaneAutoScript AzurLaneAutoScript.app/Contents/AzurLaneAutoScript
-            cp Info.plist AzurLaneAutoScript.app/Contents/
-            rdfind -minsize 128 -makehardlinks true AzurLaneAutoScript.app
+            mkdir -p AzurPilot.app/Contents/MacOS
+            cp target/release/alas-launcher AzurPilot.app/Contents/MacOS/
+            mkdir -p AzurPilot.app/Contents/Resources
+            cp icons/icon.icns AzurPilot.app/Contents/Resources/
+            ditto package-root/AzurLaneAutoScript AzurPilot.app/Contents/AzurLaneAutoScript
+            cp Info.plist AzurPilot.app/Contents/
+            rdfind -minsize 128 -makehardlinks true AzurPilot.app
             uv run python - <<EOF
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript.app')
+              t.add('AzurPilot.app')
             EOF
 
-            cp deploy.mac-cn.yaml AzurLaneAutoScript.app/Contents/AzurLaneAutoScript/config/deploy.yaml
+            cp deploy.mac-cn.yaml AzurPilot.app/Contents/AzurLaneAutoScript/config/deploy.yaml
             uv run python - <<EOF
             import tarfile, lzma
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
-              t.add('AzurLaneAutoScript.app')
+              t.add('AzurPilot.app')
             EOF
           linux: |
             set -eux

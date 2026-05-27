@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "alas-launcher"
-version = "1.6.2"
+version = "1.6.3test"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
