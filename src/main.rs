@@ -10,6 +10,7 @@ use std::{
     cell::Cell,
     collections::HashMap,
     fs,
+    io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
@@ -285,10 +286,14 @@ fn check_launcher_update_and_restart() -> Result<bool> {
     }
 
     let platform_key = launcher_update_platform_key();
-    let client = reqwest::blocking::Client::builder()
+    let manifest_client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    let manifest_text = client.get(LAUNCHER_UPDATE_URL).send()?.text()?;
+    let manifest_text = manifest_client
+        .get(LAUNCHER_UPDATE_URL)
+        .send()?
+        .error_for_status()?
+        .text()?;
     let manifest: LauncherUpdateManifest = serde_json::from_str(&manifest_text)?;
     let current_version = env!("CARGO_PKG_VERSION");
     if !launcher_version_is_newer(current_version, &manifest.version) {
@@ -308,24 +313,59 @@ fn check_launcher_update_and_restart() -> Result<bool> {
         "Launcher update available: {} -> {}",
         current_version, manifest.version
     );
-    let bytes = client.get(&platform.url).send()?.bytes()?;
-    let digest = Sha256::digest(&bytes);
+    let current_exe = std::env::current_exe()?;
+    let update_path = launcher_update_temp_path(&current_exe);
+    download_launcher_update(&platform.url, &update_path, &platform.sha256)?;
+    make_executable(&update_path)?;
+    replace_launcher_and_restart(&current_exe, &update_path)?;
+    Ok(true)
+}
+
+fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(None)
+        .build()?;
+    info!("Downloading launcher update from {url}");
+    let mut response = client.get(url).send()?.error_for_status()?;
+    let mut file = fs::File::create(update_path)
+        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut downloaded = 0u64;
+    let mut buffer = [0u8; 128 * 1024];
+
+    loop {
+        let size = response
+            .read(&mut buffer)
+            .with_context(|| format!("下载启动器更新失败：{url}"))?;
+        if size == 0 {
+            break;
+        }
+        file.write_all(&buffer[..size])
+            .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+        hasher.update(&buffer[..size]);
+        downloaded += size as u64;
+    }
+    file.flush()
+        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+
+    let digest = hasher.finalize();
     let digest_hex = bytes_to_hex(&digest);
-    if !digest_hex.eq_ignore_ascii_case(&platform.sha256) {
+    if !digest_hex.eq_ignore_ascii_case(expected_sha256) {
+        let _ = fs::remove_file(update_path);
         return Err(anyhow!(
             "launcher update sha256 mismatch: expected {}, got {}",
-            platform.sha256,
+            expected_sha256,
             digest_hex
         ));
     }
 
-    let current_exe = std::env::current_exe()?;
-    let update_path = launcher_update_temp_path(&current_exe);
-    fs::write(&update_path, &bytes)
-        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
-    make_executable(&update_path)?;
-    replace_launcher_and_restart(&current_exe, &update_path)?;
-    Ok(true)
+    info!(
+        "Launcher update downloaded: {} bytes -> {}",
+        downloaded,
+        update_path.display()
+    );
+    Ok(())
 }
 
 fn launcher_update_platform_key() -> &'static str {
