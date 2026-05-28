@@ -374,6 +374,7 @@ pub fn cleanup_runtime_for_rebuild() -> Result<()> {
     }
 
     kill_runtime_processes(&repo_dir);
+    clean_uv_cache()?;
 
     let mut failures = Vec::new();
     for entry in fs::read_dir(&repo_dir)? {
@@ -394,6 +395,21 @@ pub fn cleanup_runtime_for_rebuild() -> Result<()> {
         bail!("部分文件清理失败：\n{}", failures.join("\n"));
     }
 
+    Ok(())
+}
+
+fn clean_uv_cache() -> Result<()> {
+    let uv = bootstrap_uv_path()?;
+    info!("Cleaning uv cache with {}", uv.display());
+    let status = Command::new(&uv)
+        .args(["cache", "clean"])
+        .env("UV_NO_PROGRESS", "1")
+        .create_no_window()
+        .status()
+        .with_context(|| format!("执行 uv 缓存清理失败：{}", uv.display()))?;
+    if !status.success() {
+        bail!("uv 缓存清理失败");
+    }
     Ok(())
 }
 
