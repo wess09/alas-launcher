@@ -94,6 +94,8 @@ const LAUNCHER_UPDATE_MIN_CHUNK_BYTES: u64 = 64 * 1024;
 const LAUNCHER_UPDATE_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 #[cfg(windows)]
 const LAUNCHER_UPDATE_NO_CONSOLE_ENV: &str = "AZURPILOT_NO_ATTACH_CONSOLE";
+#[cfg(windows)]
+const LAUNCHER_UPDATE_APPLY_ARG: &str = "--apply-launcher-update";
 const PREVIEW_NO_UPDATE_ARGS: &[&str] = &[
     "--preview-no-update",
     "--skip-update",
@@ -1172,45 +1174,140 @@ fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Resul
 
 #[cfg(windows)]
 fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Result<()> {
-    let script_path = std::env::temp_dir().join(format!(
-        "azurpilot-launcher-update-{}.cmd",
+    let helper_path = std::env::temp_dir().join(format!(
+        "azurpilot-launcher-update-helper-{}.exe",
         std::process::id()
     ));
-    let script = format!(
-        "@echo off\r\n\
-         setlocal\r\n\
-         set \"UPDATE_PATH={}\"\r\n\
-         set \"TARGET_PATH={}\"\r\n\
-         for /l %%i in (1,1,60) do (\r\n\
-         \tmove /y \"%UPDATE_PATH%\" \"%TARGET_PATH%\" >nul 2>nul\r\n\
-         \tif not errorlevel 1 goto restart\r\n\
-         \ttimeout /t 1 /nobreak >nul\r\n\
-         )\r\n\
-         exit /b 1\r\n\
-         :restart\r\n\
-         set {}=1\r\n\
-         set {}=1\r\n\
-         start \"\" \"%TARGET_PATH%\"\r\n\
-         del \"%~f0\"\r\n",
-        update_path.display(),
-        current_exe.display(),
-        LAUNCHER_UPDATE_SKIP_ENV,
-        LAUNCHER_UPDATE_NO_CONSOLE_ENV,
-    );
-    fs::write(&script_path, script)?;
+
+    fs::copy(current_exe, &helper_path).with_context(|| {
+        t!(
+            "errors.copy_file_failed",
+            src = current_exe.display().to_string(),
+            dest = helper_path.display().to_string()
+        )
+    })?;
+
     use std::os::windows::process::CommandExt;
     use winapi::um::winbase::CREATE_NO_WINDOW;
-    Command::new("cmd")
-        .args(["/C", &script_path.to_string_lossy()])
+    Command::new(&helper_path)
+        .arg(LAUNCHER_UPDATE_APPLY_ARG)
+        .arg(current_exe)
+        .arg(update_path)
+        .env(LAUNCHER_UPDATE_SKIP_ENV, "1")
+        .env(LAUNCHER_UPDATE_NO_CONSOLE_ENV, "1")
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .with_context(|| {
             t!(
                 "errors.start_update_script_failed",
-                error = script_path.display().to_string()
+                error = helper_path.display().to_string()
             )
         })?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn try_apply_launcher_update_from_args() -> Result<bool> {
+    use std::ffi::OsStr;
+
+    let mut args = std::env::args_os();
+    let _ = args.next();
+    let Some(mode) = args.next() else {
+        return Ok(false);
+    };
+    if mode != OsStr::new(LAUNCHER_UPDATE_APPLY_ARG) {
+        return Ok(false);
+    }
+
+    let target_path = args
+        .next()
+        .ok_or_else(|| anyhow!("missing launcher update target path"))?;
+    let update_path = args
+        .next()
+        .ok_or_else(|| anyhow!("missing launcher update payload path"))?;
+    apply_launcher_update_and_restart(PathBuf::from(target_path), PathBuf::from(update_path))?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn apply_launcher_update_and_restart(target_path: PathBuf, update_path: PathBuf) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..60 {
+        match move_file_replace(&update_path, &target_path) {
+            Ok(()) => {
+                restart_launcher_after_update(&target_path)?;
+                schedule_file_delete_on_reboot(&std::env::current_exe()?);
+                return Ok(());
+            }
+            Err(err) => {
+                last_error = Some(err);
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("launcher update replacement timed out")))
+}
+
+#[cfg(windows)]
+fn move_file_replace(from: &Path, to: &Path) -> Result<()> {
+    use winapi::um::winbase::{
+        MoveFileExW, MOVEFILE_COPY_ALLOWED, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from_wide = path_to_wide(from);
+    let to_wide = path_to_wide(to);
+    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH;
+    let moved = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
+    if moved == 0 {
+        return Err(anyhow!(
+            "{}: {}",
+            t!(
+                "errors.replace_launcher_failed",
+                error = to.display().to_string()
+            ),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restart_launcher_after_update(target_path: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use winapi::um::winbase::CREATE_NO_WINDOW;
+
+    Command::new(target_path)
+        .env(LAUNCHER_UPDATE_SKIP_ENV, "1")
+        .env(LAUNCHER_UPDATE_NO_CONSOLE_ENV, "1")
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .with_context(|| {
+            t!(
+                "errors.restart_launcher_failed",
+                error = target_path.display().to_string()
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn schedule_file_delete_on_reboot(path: &Path) {
+    use std::ptr;
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+
+    let path_wide = path_to_wide(path);
+    let _ = unsafe { MoveFileExW(path_wide.as_ptr(), ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
+}
+
+#[cfg(windows)]
+fn path_to_wide(path: &Path) -> Vec<u16> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+
+    path.as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1263,6 +1360,11 @@ fn set_macos_activation_policy(app: &tauri::AppHandle, regular: bool) {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if try_apply_launcher_update_from_args()? {
+        return Ok(());
+    }
+
     #[cfg(windows)]
     unsafe {
         use crate::window_util::HAS_CONSOLE;
