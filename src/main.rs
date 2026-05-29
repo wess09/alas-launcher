@@ -301,7 +301,7 @@ fn fetch_network_time(url: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc2822(date_header)?.with_timezone(&Utc))
 }
 
-fn check_launcher_update_and_restart() -> Result<bool> {
+fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate)) -> Result<bool> {
     if std::env::var_os(LAUNCHER_UPDATE_SKIP_ENV).is_some() {
         info!("Skipping launcher update check after restart");
         std::env::remove_var(LAUNCHER_UPDATE_SKIP_ENV);
@@ -336,21 +336,52 @@ fn check_launcher_update_and_restart() -> Result<bool> {
         "Launcher update available: {} -> {}",
         current_version, manifest.version
     );
+    status_updater(
+        SplashUpdate::loading(
+            t!("launcher_update.updating"),
+            t!(
+                "launcher_update.available_detail",
+                version = manifest.version.clone()
+            ),
+            8,
+        )
+        .with_subtitle(t!("launcher_update.status")),
+    );
+
     let current_exe = std::env::current_exe()?;
     let update_path = launcher_update_temp_path(&current_exe);
-    download_launcher_update(&platform.url, &update_path, &platform.sha256)?;
+    download_launcher_update(
+        &platform.url,
+        &update_path,
+        &platform.sha256,
+        &mut status_updater,
+    )?;
     make_executable(&update_path)?;
+    status_updater(
+        SplashUpdate::loading(
+            t!("launcher_update.restart_title"),
+            t!("launcher_update.restarting_detail"),
+            100,
+        )
+        .with_subtitle(t!("launcher_update.restart_status")),
+    );
     replace_launcher_and_restart(&current_exe, &update_path)?;
     Ok(true)
 }
 
-fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str) -> Result<()> {
+fn download_launcher_update(
+    url: &str,
+    update_path: &Path,
+    expected_sha256: &str,
+    mut status_updater: impl FnMut(SplashUpdate),
+) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(None)
         .build()?;
     info!("Downloading launcher update from {url}");
     let mut response = client.get(url).send()?.error_for_status()?;
+    let total_bytes = response.content_length();
     let mut file = fs::File::create(update_path).with_context(|| {
         t!(
             "errors.write_update_failed",
@@ -360,6 +391,9 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
     let mut hasher = Sha256::new();
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 128 * 1024];
+    let mut last_reported_progress = 8u8;
+    let mut last_reported_at = Instant::now() - Duration::from_secs(1);
+    let download_started_at = Instant::now();
 
     loop {
         let size = response
@@ -376,6 +410,19 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
         })?;
         hasher.update(&buffer[..size]);
         downloaded += size as u64;
+
+        let (progress, detail) =
+            launcher_download_progress_detail(downloaded, total_bytes, download_started_at);
+        if progress > last_reported_progress
+            || last_reported_at.elapsed() >= Duration::from_millis(250)
+        {
+            last_reported_progress = progress;
+            last_reported_at = Instant::now();
+            status_updater(
+                SplashUpdate::loading(t!("launcher_update.updating"), detail, progress)
+                    .with_subtitle(t!("launcher_update.status")),
+            );
+        }
     }
     file.flush().with_context(|| {
         t!(
@@ -383,6 +430,15 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
             error = update_path.display().to_string()
         )
     })?;
+
+    status_updater(
+        SplashUpdate::loading(
+            t!("launcher_update.updating"),
+            t!("launcher_update.verifying_detail"),
+            92,
+        )
+        .with_subtitle(t!("launcher_update.status")),
+    );
 
     let digest = hasher.finalize();
     let digest_hex = bytes_to_hex(&digest);
@@ -401,6 +457,68 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
         update_path.display()
     );
     Ok(())
+}
+
+fn launcher_download_progress_detail(
+    downloaded: u64,
+    total_bytes: Option<u64>,
+    started_at: Instant,
+) -> (u8, String) {
+    let speed = format_speed(download_speed_bytes_per_second(downloaded, started_at));
+    if let Some(total) = total_bytes.filter(|total| *total > 0) {
+        let percentage = ((downloaded.min(total) * 100) / total) as u8;
+        let progress = scale_launcher_update_progress(percentage, 12, 88);
+        let detail = t!(
+            "launcher_update.downloading_detail",
+            downloaded = format_bytes(downloaded),
+            total = format_bytes(total),
+            percent = percentage.to_string(),
+            speed = speed
+        )
+        .to_string();
+        return (progress, detail);
+    }
+
+    let mib_downloaded = downloaded / (1024 * 1024);
+    let progress = (12 + mib_downloaded.min(76) as u8).min(88);
+    let detail = t!(
+        "launcher_update.downloading_detail_unknown",
+        downloaded = format_bytes(downloaded),
+        speed = speed
+    )
+    .to_string();
+    (progress, detail)
+}
+
+fn scale_launcher_update_progress(percentage: u8, start: u8, end: u8) -> u8 {
+    let span = end.saturating_sub(start) as u16;
+    start + (((percentage.min(100) as u16) * span) / 100) as u8
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GIB {
+        format!("{:.1} GiB", bytes_f / GIB)
+    } else if bytes_f >= MIB {
+        format!("{:.1} MiB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.1} KiB", bytes_f / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn download_speed_bytes_per_second(downloaded: u64, started_at: Instant) -> f64 {
+    let elapsed = started_at.elapsed().as_secs_f64().max(0.1);
+    downloaded as f64 / elapsed
+}
+
+fn format_speed(bytes_per_second: f64) -> String {
+    format_bytes(bytes_per_second.max(0.0).round() as u64)
 }
 
 fn launcher_update_platform_key() -> &'static str {
@@ -620,15 +738,6 @@ fn main() -> Result<()> {
     info!("Launcher log file: log/{}", today_launcher_log_filename());
     if preview_no_update {
         info!("Preview no-update mode enabled; skipping launcher update check");
-    } else {
-        match check_launcher_update_and_restart() {
-            Ok(true) => {
-                info!("Launcher update installed, restarting");
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(e) => warn!("Launcher update check failed: {e:#}"),
-        }
     }
     if preview_crash {
         info!("Preview crash mode enabled; splash will stop on an artificial error state");
@@ -858,6 +967,29 @@ fn main() -> Result<()> {
                                 crate::setup::get_tip()
                             )),
                         );
+
+                        if !preview_no_update {
+                            let launcher_progress = Cell::new(0u8);
+                            let mut launcher_status_updater = |mut update: SplashUpdate| {
+                                update.progress = update.progress.max(launcher_progress.get());
+                                launcher_progress.set(update.progress);
+                                update_splash(&splash, &update);
+                            };
+
+                            match check_launcher_update_and_restart(&mut launcher_status_updater) {
+                                Ok(true) => {
+                                    info!("Launcher update installed, restarting");
+                                    setup_completed.store(true, Ordering::SeqCst);
+                                    setup_running.store(false, Ordering::SeqCst);
+                                    allow_exit.store(true, Ordering::SeqCst);
+                                    app_handle.exit(0);
+                                    return;
+                                }
+                                Ok(false) => {}
+                                Err(e) => warn!("Launcher update check failed: {e:#}"),
+                            }
+                        }
+
                         if preview_crash {
                             status_updater(
                                 SplashUpdate::error(

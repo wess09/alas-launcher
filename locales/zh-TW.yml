@@ -65,6 +65,17 @@ setup:
   download_python_title: "下載 Python"
   creating_venv_title: "建立虛擬環境"
 
+launcher_update:
+  updating: "啟動器更新中"
+  status: "啟動器更新中"
+  available_detail: "發現啟動器新版本 %{version}，正在準備下載。"
+  downloading_detail: "已下載 %{downloaded} / %{total}（%{percent}%），速度 %{speed}/s。"
+  downloading_detail_unknown: "已下載 %{downloaded}，速度 %{speed}/s。"
+  verifying_detail: "下載完成，正在校驗更新檔案。"
+  restart_title: "正在重新啟動啟動器"
+  restarting_detail: "更新已準備好，啟動器即將重新啟動。"
+  restart_status: "準備重新啟動..."
+
 dialog:
   cleaning_env: "正在清理環境"
   cleaning_env_detail: "正在移除未完成的啟動環境，下次啟動會自動完全重建。"

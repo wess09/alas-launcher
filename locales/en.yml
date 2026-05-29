@@ -65,6 +65,17 @@ setup:
   download_python_title: "Download Python"
   creating_venv_title: "Create virtual environment"
 
+launcher_update:
+  updating: "Updating launcher"
+  status: "Updating launcher"
+  available_detail: "Launcher version %{version} is available. Preparing download."
+  downloading_detail: "Downloaded %{downloaded} / %{total} (%{percent}%), speed %{speed}/s."
+  downloading_detail_unknown: "Downloaded %{downloaded}, speed %{speed}/s."
+  verifying_detail: "Download complete. Verifying update file."
+  restart_title: "Restarting launcher"
+  restarting_detail: "Update is ready. The launcher will restart shortly."
+  restart_status: "Preparing restart..."
+
 dialog:
   cleaning_env: "Cleaning environment"
   cleaning_env_detail: "Removing incomplete startup environment. It will be fully rebuilt on next launch."

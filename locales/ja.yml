@@ -65,6 +65,17 @@ setup:
   download_python_title: "Python をダウンロード"
   creating_venv_title: "仮想環境を作成中"
 
+launcher_update:
+  updating: "ランチャーを更新中"
+  status: "ランチャーを更新中"
+  available_detail: "ランチャーの新バージョン %{version} が見つかりました。ダウンロードを準備中です。"
+  downloading_detail: "%{downloaded} / %{total}（%{percent}%）をダウンロード済み、速度 %{speed}/s。"
+  downloading_detail_unknown: "%{downloaded} をダウンロード済み、速度 %{speed}/s。"
+  verifying_detail: "ダウンロードが完了しました。更新ファイルを検証中です。"
+  restart_title: "ランチャーを再起動中"
+  restarting_detail: "更新の準備が完了しました。まもなくランチャーを再起動します。"
+  restart_status: "再起動を準備中..."
+
 dialog:
   cleaning_env: "環境をクリーンアップ中"
   cleaning_env_detail: "未完了の起動環境を削除しています。次回起動時に自動的に完全に再構築されます。"
