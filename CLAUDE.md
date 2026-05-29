@@ -32,6 +32,68 @@ cargo check
 
 构建脚本（`build.rs`）需要 `ALAS_BOOTSTRAP_UV` 环境变量指向要内嵌的 `uv` 二进制文件。本地开发不设置时使用空占位符，启动器会在运行时从 PATH 中查找 `uv` 或通过环境变量 `UV` 指定。
 
+## 启动参数
+
+启动器支持以下命令行参数（Windows 使用 `/` 前缀同样有效）：
+
+| 参数 | 别名 | 说明 |
+|---|---|---|
+| `--lang <locale>` | `--locale <locale>` | 覆盖系统语言，强制使用指定语言显示界面。支持的值：`zh-CN`（简体中文）、`zh-TW`（繁体中文）、`ja`（日语）、`en`（英语）。也支持 `--lang=zh-CN` 形式。 |
+| `--preview-no-update` | `--skip-update`、`--no-update`、`--disable-update` | 跳过仓库更新，直接使用本地文件启动。用于开发调试。 |
+| `--preview-crash` | `--preview-error`、`--crash-preview`、`--error-preview` | 模拟启动失败，停留在错误页面以检查 UI 样式。隐含 `--preview-no-update`。 |
+
+示例：
+
+```bash
+# 以日语界面启动
+alas-launcher --lang ja
+
+# 以英语界面启动，跳过更新
+alas-launcher --lang en --skip-update
+
+# 预览错误页面
+alas-launcher --preview-crash
+```
+
+## 国际化（i18n）
+
+启动器支持 4 种界面语言，根据系统 locale 自动选择，也可通过 `--lang` 启动参数手动覆盖：
+
+- `zh-CN` — 简体中文（基准语言）
+- `zh-TW` — 繁体中文
+- `ja` — 日语
+- `en` — 英语
+
+### 翻译文件
+
+翻译文件位于 `locales/` 目录，使用 YAML 格式：
+
+```
+locales/
+├── zh-CN.yml    # 简体中文
+├── zh-TW.yml    # 繁体中文
+├── ja.yml       # 日语
+└── en.yml       # 英语
+```
+
+每个文件按模块分组（`splash`、`setup`、`dialog`、`tray`、`titlebar`、`error_page`、`notify`、`errors`、`tips`），key 用点分隔。
+
+### 添加新字符串
+
+1. 在 `locales/zh-CN.yml` 中添加 key 和中文值
+2. 在其他 3 个语言文件中添加对应翻译
+3. 在 Rust 代码中使用 `t!("module.key")` 调用（需要 `.to_string()` 转换为 `String`）
+4. 带参数的字符串使用 `t!("module.key", param = value)` 语法，YAML 中用 `%{param}` 占位
+
+### 语言检测逻辑
+
+`src/i18n.rs` 中的 `detect_locale()` 按以下优先级选择语言：
+1. 命令行参数 `--lang` / `--locale`（最高优先级）
+2. 系统 locale（通过 `sys-locale` crate 获取）
+3. 回退到 `en`
+
+支持的 locale 映射：`zh*` → `zh-CN`，`zh-TW`/`zh-HK`/`zh-Hant` → `zh-TW`，`ja*` → `ja`，其他 → `en`。
+
 ## 架构
 
 ### 源码模块（`src/`）
@@ -42,6 +104,7 @@ cargo check
 | `backend.rs` | ~330 | 启动/终止 `gui.py` 子进程、端口扫描与占用进程清理、后端生命周期管理 |
 | `setup.rs` | ~1460 | 环境配置：Python/uv/adb/git 安装、git 更新、uv 依赖同步、deploy.yaml 迁移、运行时清理 |
 | `notify.rs` | ~320 | SSE 通知流、平台原生桌面通知（Windows Toast / Linux notify-rust / macOS Tauri 插件） |
+| `i18n.rs` | ~55 | 国际化：系统语言检测、`--lang` 启动参数解析、locale 设置 |
 | `window_util.rs` | ~45 | Windows `CREATE_NO_WINDOW` trait，控制子进程是否创建控制台窗口 |
 
 ### 运行时流程

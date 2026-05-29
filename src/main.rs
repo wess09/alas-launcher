@@ -2,9 +2,14 @@
 #![windows_subsystem = "windows"]
 
 mod backend;
+mod i18n;
 mod notify;
 mod setup;
 mod window_util;
+
+#[macro_use]
+extern crate rust_i18n;
+i18n!("locales", fallback = "en");
 
 use std::{
     cell::Cell,
@@ -26,6 +31,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use reqwest::header::DATE;
+use rust_i18n::t;
 use serde::Deserialize;
 use serde_json::to_string;
 use sha2::{Digest, Sha256};
@@ -59,8 +65,8 @@ const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
 const MENUBAR_ICON_1X: &[u8] = include_bytes!("../icons/menubar.png");
 #[cfg(windows)]
 const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
-const SPLASH_BG_LIGHT: &[u8] = include_bytes!("../bg/l_bg.png");
-const SPLASH_BG_DARK: &[u8] = include_bytes!("../bg/b_bg.png");
+const SPLASH_BG_LIGHT: &[u8] = include_bytes!("../bg/l_bg.webp");
+const SPLASH_BG_DARK: &[u8] = include_bytes!("../bg/b_bg.webp");
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const BACKEND_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(windows, target_os = "android"))]
@@ -159,18 +165,18 @@ fn begin_startup_cleanup(
         update_splash(
             &splash,
             &SplashUpdate::loading(
-                "正在清理环境",
-                "正在移除未完成的启动环境，下次启动会自动完全重建。",
+                t!("dialog.cleaning_env"),
+                t!("dialog.cleaning_env_detail"),
                 99,
             )
-            .with_subtitle("请稍候，不要手动删除文件。"),
+            .with_subtitle(t!("dialog.cleaning_wait")),
         );
     }
 
     app_handle
         .dialog()
-        .message("正在清理环境，下次启动将自动完全重建。")
-        .title("正在清理环境")
+        .message(t!("dialog.cleaning_message"))
+        .title(t!("dialog.cleaning_env"))
         .show(|_| {});
 
     thread::spawn(move || {
@@ -194,8 +200,8 @@ fn begin_startup_cleanup(
                     update_splash(
                         &splash,
                         &SplashUpdate::error(
-                            "清理失败",
-                            format!("部分文件仍被占用或无法删除，请关闭相关进程后重试。\n\n{e:#}"),
+                            t!("dialog.cleanup_failed"),
+                            t!("dialog.cleanup_failed_detail", error = format!("{e:#}")),
                             99,
                         ),
                     );
@@ -222,13 +228,13 @@ fn time_bomb_config() -> Result<Option<TimeBombConfig>> {
     }
 
     let expires_at = cargo_toml_value(section, "expires-at")
-        .ok_or_else(|| anyhow!("time-bomb.expires-at 未配置"))?;
+        .ok_or_else(|| anyhow!(t!("errors.time_bomb_not_configured")))?;
     let expires_at = DateTime::parse_from_rfc3339(&expires_at)
-        .map_err(|err| anyhow!("time-bomb.expires-at 格式错误：{err}"))?;
+        .map_err(|err| anyhow!(t!("errors.time_bomb_format_error", error = err.to_string())))?;
     let network_time_url = cargo_toml_value(section, "network-time-url")
         .unwrap_or_else(|| "http://www.gstatic.com/generate_204".to_owned());
     let message = cargo_toml_value(section, "message")
-        .unwrap_or_else(|| "测试已结束，请安装正式版".to_owned());
+        .unwrap_or_else(|| t!("errors.time_bomb_expired").to_string());
 
     Ok(Some(TimeBombConfig {
         expires_at,
@@ -290,7 +296,7 @@ fn fetch_network_time(url: &str) -> Result<DateTime<Utc>> {
     let date_header = response
         .headers()
         .get(DATE)
-        .ok_or_else(|| anyhow!("网络时间响应缺少 Date 头"))?
+        .ok_or_else(|| anyhow!(t!("errors.network_time_missing")))?
         .to_str()?;
     Ok(DateTime::parse_from_rfc2822(date_header)?.with_timezone(&Utc))
 }
@@ -345,8 +351,12 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
         .build()?;
     info!("Downloading launcher update from {url}");
     let mut response = client.get(url).send()?.error_for_status()?;
-    let mut file = fs::File::create(update_path)
-        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+    let mut file = fs::File::create(update_path).with_context(|| {
+        t!(
+            "errors.write_update_failed",
+            error = update_path.display().to_string()
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 128 * 1024];
@@ -354,17 +364,25 @@ fn download_launcher_update(url: &str, update_path: &Path, expected_sha256: &str
     loop {
         let size = response
             .read(&mut buffer)
-            .with_context(|| format!("下载启动器更新失败：{url}"))?;
+            .with_context(|| t!("errors.download_update_failed", url = url))?;
         if size == 0 {
             break;
         }
-        file.write_all(&buffer[..size])
-            .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+        file.write_all(&buffer[..size]).with_context(|| {
+            t!(
+                "errors.write_update_failed",
+                error = update_path.display().to_string()
+            )
+        })?;
         hasher.update(&buffer[..size]);
         downloaded += size as u64;
     }
-    file.flush()
-        .with_context(|| format!("写入启动器更新文件失败：{}", update_path.display()))?;
+    file.flush().with_context(|| {
+        t!(
+            "errors.write_update_failed",
+            error = update_path.display().to_string()
+        )
+    })?;
 
     let digest = hasher.finalize();
     let digest_hex = bytes_to_hex(&digest);
@@ -476,12 +494,21 @@ fn make_executable(path: &Path) -> Result<()> {
 
 #[cfg(not(windows))]
 fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Result<()> {
-    fs::rename(update_path, current_exe)
-        .with_context(|| format!("替换启动器失败：{}", current_exe.display()))?;
+    fs::rename(update_path, current_exe).with_context(|| {
+        t!(
+            "errors.replace_launcher_failed",
+            error = current_exe.display().to_string()
+        )
+    })?;
     Command::new(current_exe)
         .env(LAUNCHER_UPDATE_SKIP_ENV, "1")
         .spawn()
-        .with_context(|| format!("重启启动器失败：{}", current_exe.display()))?;
+        .with_context(|| {
+            t!(
+                "errors.restart_launcher_failed",
+                error = current_exe.display().to_string()
+            )
+        })?;
     Ok(())
 }
 
@@ -513,7 +540,12 @@ fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Resul
         .args(["/C", &script_path.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .with_context(|| format!("启动更新脚本失败：{}", script_path.display()))?;
+        .with_context(|| {
+            t!(
+                "errors.start_update_script_failed",
+                error = script_path.display().to_string()
+            )
+        })?;
     Ok(())
 }
 
@@ -539,6 +571,17 @@ mod tests {
             Some("测试已结束，请安装正式版".to_owned()),
             cargo_toml_value(section, "message")
         );
+    }
+
+    #[test]
+    fn test_english_splash_i18n_uses_json_literals() {
+        rust_i18n::set_locale("en");
+
+        let html = splash_redesigned_shell_html("light", "dark");
+
+        assert!(html.contains(r#""defaultTip":"Sakura Empire's cherry blossoms"#));
+        assert!(!html.contains("const defaultTip = '"));
+        assert!(html.contains("window.__ALAS_SPLASH_READY = true;"));
     }
 }
 
@@ -569,6 +612,7 @@ fn main() -> Result<()> {
     }
     setup_environment()?;
     let _log_guard = initialize_logging()?;
+    crate::i18n::init();
     let preview_crash = preview_crash_arg_present();
     let preview_no_update = preview_crash || preview_no_update_arg_present();
 
@@ -637,13 +681,15 @@ fn main() -> Result<()> {
         ])
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_single_instance::init(move |app, _argv, _cwd| {
-            restore_main_window_from_tray(
-                app,
-                port,
-                recreating_main_window_for_single_instance.clone(),
-            );
-        }))
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, _argv, _cwd| {
+                restore_main_window_from_tray(
+                    app,
+                    port,
+                    recreating_main_window_for_single_instance.clone(),
+                );
+            },
+        ))
         .setup(move |app| {
             match time_bomb_expiration_message() {
                 Ok(Some(message)) => {
@@ -652,7 +698,7 @@ fn main() -> Result<()> {
                     let app_handle = app.handle().clone();
                     app.dialog()
                         .message(message)
-                        .title("测试已结束")
+                        .title(t!("dialog.test_ended"))
                         .show(move |_| {
                             app_handle.exit(0);
                         });
@@ -674,10 +720,10 @@ fn main() -> Result<()> {
                 let recreating_main_window_for_menu = recreating_main_window_for_setup.clone();
                 #[cfg(windows)]
                 let recreating_main_window_for_tray = recreating_main_window_for_setup.clone();
-                let show_item = MenuItemBuilder::new("显示 / 隐藏")
+                let show_item = MenuItemBuilder::new(t!("tray.toggle_visibility"))
                     .id("toggle_visibility")
                     .build(app)?;
-                let quit_item = MenuItemBuilder::new("退出")
+                let quit_item = MenuItemBuilder::new(t!("tray.quit"))
                     .id("quit")
                     .build(app)?;
                 let tray_menu = MenuBuilder::new(app)
@@ -714,19 +760,19 @@ fn main() -> Result<()> {
                     .on_menu_event(move |app, event| {
                         debug!("Tray menu event: {:?}", event.id());
                         match event.id().as_ref() {
-                        "toggle_visibility" => {
-                            toggle_main_window_visibility(
-                                app,
-                                port,
-                                recreating_main_window_for_menu.clone(),
-                            );
+                            "toggle_visibility" => {
+                                toggle_main_window_visibility(
+                                    app,
+                                    port,
+                                    recreating_main_window_for_menu.clone(),
+                                );
+                            }
+                            "quit" => {
+                                allow_exit.store(true, Ordering::SeqCst);
+                                app.exit(0);
+                            }
+                            _ => {}
                         }
-                        "quit" => {
-                            allow_exit.store(true, Ordering::SeqCst);
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
                     })
                     .on_tray_icon_event(move |tray, event| {
                         #[cfg(windows)]
@@ -750,15 +796,16 @@ fn main() -> Result<()> {
                             let _ = event;
                         }
                     })
-                    .build(app) {
-                        Ok(_) => {
-                            info!("System tray created successfully!");
-                        }
-                        Err(e) => {
-                            error!("Failed to create system tray: {:?}", e);
-                            return Err(Box::new(e));
-                        }
+                    .build(app)
+                {
+                    Ok(_) => {
+                        info!("System tray created successfully!");
                     }
+                    Err(e) => {
+                        error!("Failed to create system tray: {:?}", e);
+                        return Err(Box::new(e));
+                    }
+                }
             }
 
             Ok(())
@@ -779,7 +826,8 @@ fn main() -> Result<()> {
                     ctrlc::set_handler(move || {
                         allow_exit_for_ctrlc.store(true, Ordering::SeqCst);
                         handle1.exit(0);
-                    }).expect("Error setting Ctrl-C handler");
+                    })
+                    .expect("Error setting Ctrl-C handler");
                     let app_handle = app_handle.clone();
                     let backend = backend.clone();
                     let webui_config = webui_config.clone();
@@ -798,20 +846,28 @@ fn main() -> Result<()> {
                             update_splash(&splash, &update);
                         };
 
-                        status_updater(SplashUpdate::loading(
-                            "正在启动",
-                            "本地 Web 界面正在初始化，准备就绪后将自动打开窗口。",
-                            4,
-                        ).with_subtitle(format!("正在初始化... | Tips:{}", crate::setup::get_tip())));
+                        status_updater(
+                            SplashUpdate::loading(
+                                t!("splash.starting"),
+                                t!("splash.webui_init"),
+                                4,
+                            )
+                            .with_subtitle(format!(
+                                "{} | Tips:{}",
+                                t!("splash.initializing"),
+                                crate::setup::get_tip()
+                            )),
+                        );
                         if preview_crash {
                             status_updater(
                                 SplashUpdate::error(
-                                    "启动失败",
-                                    "预览崩溃模式已启用。这是用于检查错误界面的模拟故障，不会执行更新或启动后端服务。",
+                                    t!("dialog.startup_failed"),
+                                    t!("splash.preview_crash_detail"),
                                     42,
                                 )
                                 .with_subtitle(format!(
-                                    "错误界面预览中... | Tips：{}",
+                                    "{} | Tips：{}",
+                                    t!("splash.preview_crash_mode"),
                                     crate::setup::get_tip()
                                 )),
                             );
@@ -830,32 +886,33 @@ fn main() -> Result<()> {
                                 return;
                             }
                             status_updater(SplashUpdate::error(
-                                "启动失败",
-                                format!(
-                                    "无法准备环境。您可以下载下方的启动器日志以查看详细错误。\n\n{}",
-                                    e
-                                ),
+                                t!("dialog.startup_failed"),
+                                t!("dialog.repo_setup_failed", error = e.to_string()),
                                 last_progress.get().max(8),
                             ));
                             return;
                         }
                         info!("Starting gui.py on http://127.0.0.1:{}/", port);
-                        status_updater(SplashUpdate::loading(
-                            "正在启动",
-                            "本地 Web 界面正在初始化，这通常需要几秒钟时间。准备就绪后将自动打开窗口。",
-                            97,
-                        ).with_subtitle(format!("启动后端服务中... | Tips:{}", crate::setup::get_tip())));
+                        status_updater(
+                            SplashUpdate::loading(
+                                t!("splash.starting"),
+                                t!("splash.webui_init_slow"),
+                                97,
+                            )
+                            .with_subtitle(format!(
+                                "{} | Tips:{}",
+                                t!("splash.starting_backend"),
+                                crate::setup::get_tip()
+                            )),
+                        );
                         let b = match ManagedBackend::new(&webui_config) {
                             Ok(backend) => backend,
                             Err(e) => {
                                 error!("{e}");
                                 setup_running.store(false, Ordering::SeqCst);
                                 status_updater(SplashUpdate::error(
-                                    "启动失败",
-                                    format!(
-                                        "无法启动本地服务。请检查配置的端口是否已被占用。\n\n{}",
-                                        e
-                                    ),
+                                    t!("dialog.startup_failed"),
+                                    t!("dialog.backend_launch_failed", error = e.to_string()),
                                     last_progress.get().max(97),
                                 ));
                                 return;
@@ -879,11 +936,14 @@ fn main() -> Result<()> {
                             allow_exit.clone(),
                             notification_click,
                         );
-                        status_updater(SplashUpdate::loading(
-                            "正在打开窗口",
-                            "主窗口已准备就绪，即将显示。",
-                            100,
-                        ).with_subtitle(format!("启动完成！ | Tips:{}", crate::setup::get_tip())));
+                        status_updater(
+                            SplashUpdate::loading(t!("splash.opening"), t!("splash.ready"), 100)
+                                .with_subtitle(format!(
+                                    "{} | Tips:{}",
+                                    t!("splash.startup_complete"),
+                                    crate::setup::get_tip()
+                                )),
+                        );
                         let _ = splash.destroy();
                         debug!("Destroyed splash window after startup");
 
@@ -940,7 +1000,11 @@ fn main() -> Result<()> {
                         recreating_main_window_for_run.clone(),
                     );
                 }
-                tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } => {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::CloseRequested { ref api, .. },
+                    ..
+                } => {
                     debug!("Window {} close requested", label);
 
                     if label == "splash" && !setup_completed.load(Ordering::SeqCst) {
@@ -973,16 +1037,17 @@ fn main() -> Result<()> {
                             {
                                 let app_handle_for_dialog = app_handle.clone();
                                 let allow_exit_for_dialog = allow_exit.clone();
-                                let close_prompt_active_for_dialog = close_prompt_active_for_run.clone();
+                                let close_prompt_active_for_dialog =
+                                    close_prompt_active_for_run.clone();
 
                                 if let Some(main_window) = app_handle.get_webview_window("main") {
                                     app_handle
                                         .dialog()
-                                        .message("确认要离开吗？您可以选择退出，或者让它在后台默默运行")
-                                        .title("退出")
+                                        .message(t!("dialog.confirm_exit"))
+                                        .title(t!("dialog.exit"))
                                         .buttons(MessageDialogButtons::OkCancelCustom(
-                                            "退出".to_string(),
-                                            "最小化到托盘".to_string(),
+                                            t!("dialog.exit").to_string(),
+                                            t!("dialog.minimize_to_tray").to_string(),
                                         ))
                                         .parent(&main_window)
                                         .show(move |should_exit| {
@@ -992,7 +1057,9 @@ fn main() -> Result<()> {
                                                 allow_exit_for_dialog.store(true, Ordering::SeqCst);
                                                 app_handle_for_dialog.exit(0);
                                             } else {
-                                                minimize_main_window_to_tray(&app_handle_for_dialog);
+                                                minimize_main_window_to_tray(
+                                                    &app_handle_for_dialog,
+                                                );
                                             }
                                         });
                                 } else {
@@ -1104,8 +1171,13 @@ fn download_log_file(
         .map_err(|e| e.to_string())?
         .join("log")
         .join(&filename);
-    let data = fs::read(&source_path)
-        .map_err(|e| format!("无法读取日志文件 {}: {}", source_path.to_string_lossy(), e))?;
+    let data = fs::read(&source_path).map_err(|e| {
+        t!(
+            "errors.read_log_file",
+            path = source_path.to_string_lossy().to_string(),
+            error = e.to_string()
+        )
+    })?;
 
     app_handle
         .dialog()
@@ -1219,7 +1291,7 @@ __ALAS_TITLEBAR_SCRIPT__
 "#
         .replace(
             "__ALAS_TITLEBAR_SCRIPT__",
-            main_window_titlebar_injection_script(),
+            &main_window_titlebar_injection_script(),
         );
         if let Err(e) = webview.eval(&injected_js) {
             error!("Failed to inject JS to webview: {:?}", e);
@@ -1310,7 +1382,7 @@ fn wait_for_backend_connection(port: u16, timeout: Duration) -> Result<()> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("等待本地后端启动超时")))
+    Err(last_error.unwrap_or_else(|| anyhow!(t!("errors.backend_timeout"))))
 }
 
 fn navigate_backend_or_error(window: &WebviewWindow, port: u16) -> Result<bool> {
@@ -1359,7 +1431,7 @@ fn backend_error_response(
 
 fn backend_error_request_params(uri: &str) -> (u16, String) {
     let mut port = 22267;
-    let mut detail = "Unable to connect to local backend.".to_owned();
+    let mut detail = t!("error_page.unable_connect").to_string();
 
     if let Ok(url) = Url::parse(uri) {
         for (key, value) in url.query_pairs() {
@@ -1410,10 +1482,37 @@ fn is_backend_url(url: &Url, port: u16) -> bool {
         && url.port_or_known_default() == Some(port)
 }
 
+fn escape_html(input: impl AsRef<str>) -> String {
+    input
+        .as_ref()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn backend_error_html(port: u16, error_detail: &str) -> String {
     let backend_url_json = to_string(&backend_url(port)).unwrap();
     let error_detail_json = to_string(error_detail).unwrap();
     let titlebar_script = main_window_titlebar_injection_script();
+    let i18n = serde_json::json!({
+        "title": t!("error_page.title"),
+        "heading": t!("error_page.heading"),
+        "description": t!("error_page.description"),
+        "address": t!("error_page.address"),
+        "errorLabel": t!("error_page.error_label"),
+        "retry": t!("error_page.retry"),
+        "downloadGuiLog": t!("error_page.download_gui_log"),
+        "downloadLauncherLog": t!("error_page.download_launcher_log"),
+        "reconnecting": t!("error_page.reconnecting"),
+        "stillFailed": t!("error_page.still_failed"),
+        "retryFailed": t!("error_page.retry_failed"),
+        "preparing": t!("error_page.preparing"),
+        "saved": t!("error_page.saved"),
+        "downloadFailed": t!("error_page.download_failed"),
+    });
+    let i18n_json = to_string(&i18n).unwrap();
 
     format!(
         r#"<!doctype html>
@@ -1421,7 +1520,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AzurPilot 后端连接失败</title>
+<title>{title}</title>
 <style>
   :root {{
     color-scheme: light;
@@ -1565,22 +1664,22 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 <body>
   <main class="panel">
     <div class="mark">!</div>
-    <h1>后端连接失败</h1>
-    <p class="lead">启动器没有连上本地 AzurPilot WebUI。后端可能仍在启动、已经退出，或者端口被其他程序占用。</p>
-    <section class="details" aria-label="连接信息">
+    <h1>{heading}</h1>
+    <p class="lead">{description}</p>
+    <section class="details" aria-label="{connection_info}">
       <div class="row">
-        <div class="label">地址</div>
+        <div class="label">{address}</div>
         <div id="backend-url" class="value"></div>
       </div>
       <div class="row">
-        <div class="label">错误</div>
+        <div class="label">{error_label}</div>
         <div id="error-detail" class="value"></div>
       </div>
     </section>
     <div class="actions">
-      <button id="retry-button" class="action-button" type="button">重试连接</button>
-      <button id="gui-log-button" class="action-button" type="button">下载 WebUI 日志</button>
-      <button id="launcher-log-button" class="action-button" type="button">下载启动器日志</button>
+      <button id="retry-button" class="action-button" type="button">{retry}</button>
+      <button id="gui-log-button" class="action-button" type="button">{download_gui_log}</button>
+      <button id="launcher-log-button" class="action-button" type="button">{download_launcher_log}</button>
       <span id="retry-status" class="status"></span>
     </div>
   </main>
@@ -1589,6 +1688,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 {titlebar_script}
     }})();
 
+    const i18n = {i18n_json};
     const backendUrl = {backend_url_json};
     const errorDetail = {error_detail_json};
     const port = {port};
@@ -1605,44 +1705,44 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 
     retryButton.addEventListener('click', async () => {{
       retryButton.disabled = true;
-      retryStatus.textContent = '正在重新连接...';
+      retryStatus.textContent = i18n.reconnecting;
       try {{
         if (typeof invoke !== 'function') {{
           throw new Error('Tauri invoke is unavailable');
         }}
         const connected = await invoke('retry_backend_connection', {{ port }});
         if (!connected) {{
-          retryStatus.textContent = '仍然无法连接。';
+          retryStatus.textContent = i18n.stillFailed;
           retryButton.disabled = false;
         }}
       }} catch (error) {{
-        retryStatus.textContent = '重试失败：' + (error && error.message ? error.message : error);
+        retryStatus.textContent = i18n.retryFailed + (error && error.message ? error.message : error);
         retryButton.disabled = false;
       }}
     }});
 
     async function downloadLog(button, command, label) {{
       button.disabled = true;
-      retryStatus.textContent = '正在准备' + label + '...';
+      retryStatus.textContent = i18n.preparing.replace('%{{label}}', label);
       try {{
         if (typeof invoke !== 'function') {{
           throw new Error('Tauri invoke is unavailable');
         }}
         const filename = await invoke(command);
-        retryStatus.textContent = '已打开保存窗口：' + filename;
+        retryStatus.textContent = i18n.saved.replace('%{{filename}}', filename);
       }} catch (error) {{
-        retryStatus.textContent = label + '下载失败：' + (error && error.message ? error.message : error);
+        retryStatus.textContent = i18n.downloadFailed.replace('%{{label}}', label) + (error && error.message ? error.message : error);
       }} finally {{
         button.disabled = false;
       }}
     }}
 
     guiLogButton.addEventListener('click', () => {{
-      downloadLog(guiLogButton, 'download_today_gui_log', 'WebUI 日志');
+      downloadLog(guiLogButton, 'download_today_gui_log', '{gui_log_label}');
     }});
 
     launcherLogButton.addEventListener('click', () => {{
-      downloadLog(launcherLogButton, 'download_today_launcher_log', '启动器日志');
+      downloadLog(launcherLogButton, 'download_today_launcher_log', '{launcher_log_label}');
     }});
 
     // 每秒尝试自动刷新（重试连接）
@@ -1653,11 +1753,36 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     }}, 1000);
   </script>
 </body>
-</html>"#
+</html>"#,
+        title = t!("error_page.title"),
+        heading = t!("error_page.heading"),
+        description = t!("error_page.description"),
+        address = t!("error_page.address"),
+        error_label = t!("error_page.error_label"),
+        retry = t!("error_page.retry"),
+        download_gui_log = t!("error_page.download_gui_log"),
+        download_launcher_log = t!("error_page.download_launcher_log"),
+        gui_log_label = t!("error_page.download_gui_log"),
+        launcher_log_label = t!("error_page.download_launcher_log"),
+        connection_info = t!("error_page.connection_info"),
     )
 }
 
 fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
+    let i18n = serde_json::json!({
+        "defaultTip": t!("tips.17"),
+        "loading": t!("splash.loading_badge"),
+        "webuiInit": t!("splash.webui_init"),
+        "starting": t!("splash.starting"),
+        "errorBadge": t!("splash.error_badge"),
+        "initStopped": t!("splash.init_stopped"),
+        "progressMetaReady": t!("splash.progress_meta_ready"),
+        "preparingLog": t!("splash.preparing_log"),
+        "logSavedPrefix": t!("splash.log_saved_prefix"),
+        "logFailed": t!("splash.log_failed"),
+    });
+    let i18n_json = to_string(&i18n).unwrap();
+
     r#"<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1701,7 +1826,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     height: 100%;
     overflow: hidden;
     border-radius: 0;
-    background: url(data:image/png;base64,$LIGHT_BG) center/cover no-repeat;
+    background: url(data:image/webp;base64,$LIGHT_BG) center/cover no-repeat;
     box-shadow: none;
     display: flex;
     flex-direction: column;
@@ -1709,7 +1834,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
   }
   @media (prefers-color-scheme: dark) {
     .launcher-window {
-      background-image: url(data:image/png;base64,$DARK_BG);
+      background-image: url(data:image/webp;base64,$DARK_BG);
     }
   }
   .launcher-window::before {
@@ -2081,13 +2206,13 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
       </div>
       <div class="top-right">
         <div id="badge" class="status-badge">
-          <span id="badge-text">正在初始化...</span>
+          <span id="badge-text">$I18N_INITIALIZING</span>
         </div>
         <div class="window-controls">
-          <button id="window-minimize" class="win-btn minimize" type="button" aria-label="最小化" title="最小化">
+          <button id="window-minimize" class="win-btn minimize" type="button" aria-label="$I18N_MINIMIZE" title="$I18N_MINIMIZE">
             <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="4" x2="6" y2="4"></line></svg>
           </button>
-          <button id="window-close" class="win-btn close" type="button" aria-label="关闭" title="关闭">
+          <button id="window-close" class="win-btn close" type="button" aria-label="$I18N_CLOSE" title="$I18N_CLOSE">
             <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="2" x2="6" y2="6"></line><line x1="6" y1="2" x2="2" y2="6"></line></svg>
           </button>
         </div>
@@ -2099,9 +2224,9 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
         <div class="title-group">
           <div id="spinner" class="spinner"></div>
           <div id="error-dot" class="err-dot" style="display:none;">!</div>
-          <h1 id="title" class="main-action-text">正在启动</h1>
+          <h1 id="title" class="main-action-text">$I18N_STARTING</h1>
         </div>
-        <p id="detail" class="sub-action-text">本地 Web 界面正在初始化，准备就绪后将自动打开窗口。</p>
+        <p id="detail" class="sub-action-text">$I18N_WEBUI_INIT</p>
       </div>
 
       <div class="progress-container">
@@ -2112,11 +2237,11 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
       </div>
 
       <div class="footer-info">
-        <div id="tip-text" class="tip-text">Tips: 重樱的樱花落了，但我们的奋斗才刚开始。</div>
+        <div id="tip-text" class="tip-text">Tips: $I18N_DEFAULT_TIP</div>
         <div class="footer-right">
-          <div id="progress-meta" class="notice-text">准备就绪后将自动打开窗口</div>
+          <div id="progress-meta" class="notice-text">$I18N_PROGRESS_META</div>
           <div id="splash-actions" class="splash-actions">
-            <button id="splash-log-button" class="splash-log-button" type="button">下载启动器日志</button>
+            <button id="splash-log-button" class="splash-log-button" type="button">$I18N_DOWNLOAD_LOG</button>
           </div>
         </div>
       </div>
@@ -2124,7 +2249,8 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
   </div>
 
   <script>
-    const defaultTip = '重樱的樱花落了，但我们的奋斗才刚开始。';
+    const i18n = $I18N_JSON;
+    const defaultTip = i18n.defaultTip;
     const invoke =
       (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
       || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
@@ -2136,21 +2262,21 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     function splitSubtitle(value) {
       const text = String(value || '').trim();
       if (!text) {
-        return { status: '正在加载', tip: defaultTip };
+        return { status: i18n.loading, tip: defaultTip };
       }
       const match = text.match(/^(.*?)\s*\|\s*Tips[:：]\s*(.*)$/);
       if (!match) {
         return { status: text, tip: defaultTip };
       }
       return {
-        status: match[1].trim() || '正在加载',
+        status: match[1].trim() || i18n.loading,
         tip: match[2].trim() || defaultTip,
       };
     }
 
     function normalizeDetail(value) {
       const text = String(value || '').trim();
-      return text || '本地 Web 界面正在初始化，准备就绪后将自动打开窗口。';
+      return text || i18n.webuiInit;
     }
 
     window.__ALAS_SPLASH_UPDATE = function (payload) {
@@ -2164,13 +2290,13 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
       const splashActions = document.getElementById('splash-actions');
       const subtitle = splitSubtitle(payload.subtitle);
 
-      badgeText.textContent = payload.is_error ? '启动失败' : subtitle.status;
+      badgeText.textContent = payload.is_error ? i18n.errorBadge : subtitle.status;
       document.getElementById('tip-text').textContent = 'Tips: ' + subtitle.tip;
-      document.getElementById('title').textContent = payload.title || '正在启动';
+      document.getElementById('title').textContent = payload.title || i18n.starting;
       document.getElementById('detail').textContent = normalizeDetail(payload.detail);
       progressMeta.textContent = payload.is_error
-        ? '初始化已停止'
-        : '准备就绪后将自动打开窗口';
+        ? i18n.initStopped
+        : i18n.progressMetaReady;
 
       const progress = Math.max(0, Math.min(100, Number(payload.progress || 0)));
       progressFill.style.width = progress + '%';
@@ -2226,15 +2352,15 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
       const button = document.getElementById('splash-log-button');
       const progressMeta = document.getElementById('progress-meta');
       button.disabled = true;
-      progressMeta.textContent = '正在准备启动器日志...';
+      progressMeta.textContent = i18n.preparingLog;
       try {
         if (typeof invoke !== 'function') {
           throw new Error('Tauri invoke is unavailable');
         }
         const filename = await invoke('download_today_launcher_log');
-        progressMeta.textContent = '已打开保存窗口：' + filename;
+        progressMeta.textContent = i18n.logSavedPrefix + filename;
       } catch (error) {
-        progressMeta.textContent = '启动器日志下载失败：' + (error && error.message ? error.message : error);
+        progressMeta.textContent = i18n.logFailed + (error && error.message ? error.message : error);
       } finally {
         button.disabled = false;
       }
@@ -2247,6 +2373,15 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     .replace("$LIGHT_BG", light_bg_b64)
     .replace("$DARK_BG", dark_bg_b64)
     .replace("$LAUNCHER_VERSION", env!("CARGO_PKG_VERSION"))
+    .replace("$I18N_JSON", &i18n_json)
+    .replace("$I18N_INITIALIZING", &escape_html(t!("splash.initializing")))
+    .replace("$I18N_MINIMIZE", &escape_html(t!("titlebar.minimize")))
+    .replace("$I18N_CLOSE", &escape_html(t!("titlebar.close")))
+    .replace("$I18N_STARTING", &escape_html(t!("splash.starting")))
+    .replace("$I18N_WEBUI_INIT", &escape_html(t!("splash.webui_init")))
+    .replace("$I18N_DEFAULT_TIP", &escape_html(t!("tips.17")))
+    .replace("$I18N_PROGRESS_META", &escape_html(t!("splash.progress_meta_ready")))
+    .replace("$I18N_DOWNLOAD_LOG", &escape_html(t!("splash.download_log")))
 }
 
 fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow> {
@@ -2379,226 +2514,99 @@ fn toggle_main_window_visibility(
     }
 }
 
-fn main_window_titlebar_injection_script() -> &'static str {
+fn main_window_titlebar_injection_script() -> String {
     #[cfg(target_os = "macos")]
     {
-        ""
+        String::new()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        r#"
+        let i18n = serde_json::json!({
+            "hideLabel": t!("titlebar.minimize_to_tray"),
+            "minimizeLabel": t!("titlebar.minimize_window"),
+            "minimizeTitle": t!("titlebar.minimize"),
+            "maximizeLabel": t!("titlebar.maximize_restore_window"),
+            "maximizeTitle": t!("titlebar.maximize"),
+            "closeLabel": t!("titlebar.close_window"),
+            "closeTitle": t!("titlebar.close"),
+            "restoreTitle": t!("titlebar.restore"),
+            "maximizeActionTitle": t!("titlebar.maximize_action"),
+            "restoreLabel": t!("titlebar.restore_window"),
+            "maximizeLabelText": t!("titlebar.maximize_window"),
+        });
+        let i18n_json = serde_json::to_string(&i18n).unwrap();
+        let mut s = String::with_capacity(4096);
+        s.push_str("const i18n = ");
+        s.push_str(&i18n_json);
+        s.push_str(r#";
         const invoke =
             (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
             || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
         if (typeof invoke !== 'function') {
             return;
         }
-
-        const titlebarHeight = 44;
         const ensureTitlebar = () => {
             if (!document.body || document.getElementById('alas-launcher-titlebar')) {
                 return;
             }
-
             if (!document.getElementById('alas-launcher-titlebar-style')) {
                 const style = document.createElement('style');
                 style.id = 'alas-launcher-titlebar-style';
-                // 【完全参考加载页面的 CSS】将主页面的图标设为透明过渡，只有容器 .header-icon:hover 才展示 SVG 内部线条
-                style.textContent = `
-                    :root {
-                        --alas-titlebar-height: 44px;
-                    }
-                    #alas-launcher-titlebar {
-                        position: fixed;
-                        top: 0;
-                        left: 0;
-                        right: 0;
-                        height: var(--alas-titlebar-height);
-                        z-index: 2147483647;
-                        user-select: none;
-                        pointer-events: none;
-                        background: transparent;
-                    }
-                    #alas-launcher-titlebar * {
-                        box-sizing: border-box;
-                    }
-                    .alas-titlebar-drag-zone {
-                        position: absolute;
-                        inset: 0 120px 0 0;
-                        height: 100%;
-                        pointer-events: auto;
-                        background: transparent;
-                    }
-                    .header-icon {
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                        padding: 0 12px;
-                        position: absolute;
-                        top: 0;
-                        right: 0;
-                        height: 100%;
-                        pointer-events: auto;
-                    }
-                    .icon {
-                        width: 12px;
-                        height: 12px;
-                        border-radius: 50%;
-                        border: none;
-                        cursor: pointer;
-                        flex: 0 0 auto;
-                        position: relative;
-                        transition: filter 120ms ease;
-                        display: inline-flex;
-                        align-items: center;
-                        justify-content: center;
-                    }
-                    .icon:active {
-                        filter: brightness(0.85);
-                    }
-                    .icon-hide {
-                        background: #3b82f6;
-                        box-shadow: 0 0 0 0.5px #2563eb;
-                    }
-                    .icon-close {
-                        background: #ff5f57;
-                        box-shadow: 0 0 0 0.5px #e0443e;
-                    }
-                    .icon-minimize {
-                        background: #febc2e;
-                        box-shadow: 0 0 0 0.5px #d4a017;
-                    }
-                    .icon-maximize {
-                        background: #28c840;
-                        box-shadow: 0 0 0 0.5px #14ae35;
-                    }
-                    .icon svg {
-                        width: 7px;
-                        height: 7px;
-                        stroke: rgba(0,0,0,0.72);
-                        fill: none;
-                        stroke-width: 1.35;
-                        stroke-linecap: round;
-                        stroke-linejoin: round;
-                        opacity: 0;
-                        transition: opacity 150ms ease;
-                    }
-                    .header-icon:hover .icon svg {
-                        opacity: 1;
-                    }
-                    @media (max-width: 680px) {
-                        .alas-titlebar-drag-zone {
-                            inset-right: 88px;
-                        }
-                    }
-                `;
+                style.textContent = ':root{--alas-titlebar-height:44px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--alas-titlebar-height);z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 120px 0 0;height:100%;pointer-events:auto;background:transparent}.header-icon{display:flex;align-items:center;gap:8px;padding:0 12px;position:absolute;top:0;right:0;height:100%;pointer-events:auto}.icon{width:12px;height:12px;border-radius:50%;border:none;cursor:pointer;flex:0 0 auto;position:relative;transition:filter 120ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:active{filter:brightness(0.85)}.icon-hide{background:#3b82f6;box-shadow:0 0 0 .5px #2563eb}.icon-close{background:#ff5f57;box-shadow:0 0 0 .5px #e0443e}.icon-minimize{background:#febc2e;box-shadow:0 0 0 .5px #d4a017}.icon-maximize{background:#28c840;box-shadow:0 0 0 .5px #14ae35}.icon svg{width:7px;height:7px;stroke:rgba(0,0,0,.72);fill:none;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:opacity 150ms ease}.header-icon:hover .icon svg{opacity:1}@media(max-width:680px){.alas-titlebar-drag-zone{inset-right:88px}}';
                 document.head.appendChild(style);
             }
-
             const titlebar = document.createElement('div');
             titlebar.id = 'alas-launcher-titlebar';
-            titlebar.innerHTML = `
-                <div class="alas-titlebar-drag-zone" aria-hidden="true"></div>
-                <div class="header-icon">
-                    <button type="button" class="icon icon-hide" data-action="hide" aria-label="最小化到托盘" title="最小化到托盘">
-                        <svg viewBox="0 0 6 6"><rect x="1" y="1" width="4" height="4" rx="1"/><path d="M2 3h2"/></svg>
-                    </button>
-                    <button type="button" class="icon icon-minimize" data-action="minimize" aria-label="最小化窗口" title="最小化">
-                        <svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg>
-                    </button>
-                    <button type="button" class="icon icon-maximize" data-action="maximize" aria-label="最大化/还原窗口" title="最大化">
-                        <svg viewBox="0 0 6 6" class="svg-restore" style="display:none">
-                            <polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/>
-                        </svg>
-                        <svg viewBox="0 0 6 6" class="svg-maximize">
-                            <polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/>
-                        </svg>
-                    </button>
-
-                    <button type="button" class="icon icon-close" data-action="close" aria-label="关闭窗口" title="关闭">
-                        <svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg>
-                    </button>
-                </div>
-            `;
-
+            titlebar.innerHTML = '<div class="alas-titlebar-drag-zone" aria-hidden="true"></div><div class="header-icon"><button type="button" class="icon icon-hide" data-action="hide" aria-label="'+i18n.hideLabel+'" title="'+i18n.hideLabel+'"><svg viewBox="0 0 6 6"><rect x="1" y="1" width="4" height="4" rx="1"/><path d="M2 3h2"/></svg></button><button type="button" class="icon icon-minimize" data-action="minimize" aria-label="'+i18n.minimizeLabel+'" title="'+i18n.minimizeTitle+'"><svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg></button><button type="button" class="icon icon-maximize" data-action="maximize" aria-label="'+i18n.maximizeLabel+'" title="'+i18n.maximizeTitle+'"><svg viewBox="0 0 6 6" class="svg-restore" style="display:none"><polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/></svg><svg viewBox="0 0 6 6" class="svg-maximize"><polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/></svg></button><button type="button" class="icon icon-close" data-action="close" aria-label="'+i18n.closeLabel+'" title="'+i18n.closeTitle+'"><svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg></button></div>';
             document.body.dataset.alasCustomTitlebar = 'true';
             document.body.prepend(titlebar);
-
             const dragZone = titlebar.querySelector('.alas-titlebar-drag-zone');
             const maximizeButton = titlebar.querySelector('[data-action="maximize"]');
-
             const syncMaximizeState = async () => {
                 if (!maximizeButton) return;
                 try {
                     const maximized = await invoke('window_is_maximized');
                     maximizeButton.dataset.maximized = maximized ? 'true' : 'false';
-                    maximizeButton.title = maximized ? '还原' : '最大化';
-                    maximizeButton.setAttribute('aria-label', maximized ? '还原窗口' : '最大化窗口');
+                    maximizeButton.title = maximized ? i18n.restoreTitle : i18n.maximizeActionTitle;
+                    maximizeButton.setAttribute('aria-label', maximized ? i18n.restoreLabel : i18n.maximizeLabelText);
                     maximizeButton.querySelector('.svg-maximize').style.display = maximized ? 'none' : '';
                     maximizeButton.querySelector('.svg-restore').style.display = maximized ? '' : 'none';
                 } catch (e) {
                     console.error('Failed to sync maximize state', e);
                 }
             };
-
             titlebar.querySelectorAll('button[data-action]').forEach(button => {
                 button.addEventListener('click', async event => {
                     event.stopPropagation();
                     try {
                         switch (button.dataset.action) {
-                            case 'hide':
-                                await invoke('window_hide');
-                                break;
-                            case 'minimize':
-                                await invoke('window_minimize');
-                                break;
-                            case 'maximize':
-                                await invoke('window_toggle_maximize');
-                                await syncMaximizeState();
-                                break;
-                            case 'close':
-                                await invoke('window_close');
-                                break;
-                            default:
-                                break;
+                            case 'hide': await invoke('window_hide'); break;
+                            case 'minimize': await invoke('window_minimize'); break;
+                            case 'maximize': await invoke('window_toggle_maximize'); await syncMaximizeState(); break;
+                            case 'close': await invoke('window_close'); break;
                         }
                     } catch (error) {
-                        console.error(`Failed to handle ${button.dataset.action} window action`, error);
+                        console.error('Failed to handle ' + button.dataset.action + ' window action', error);
                     }
                 });
             });
-
             dragZone.addEventListener('mousedown', event => {
-                if (event.button !== 0 || event.target.closest('button')) {
-                    return;
-                }
-                invoke('window_start_dragging').catch(error => {
-                    console.error('Failed to start dragging from titlebar', error);
-                });
+                if (event.button !== 0 || event.target.closest('button')) return;
+                invoke('window_start_dragging').catch(error => { console.error('Failed to start dragging from titlebar', error); });
             });
             dragZone.addEventListener('dblclick', async event => {
-                if (event.target.closest('button')) {
-                    return;
-                }
-                try {
-                    await invoke('window_toggle_maximize');
-                    await syncMaximizeState();
-                } catch (error) {
-                    console.error('Failed to toggle maximize from titlebar', error);
-                }
+                if (event.target.closest('button')) return;
+                try { await invoke('window_toggle_maximize'); await syncMaximizeState(); }
+                catch (error) { console.error('Failed to toggle maximize from titlebar', error); }
             });
-
-            window.addEventListener('resize', () => {
-                void syncMaximizeState();
-            });
-
+            window.addEventListener('resize', () => { void syncMaximizeState(); });
             void syncMaximizeState();
         };
-
         ensureTitlebar();
         if (!document.body) {
             window.addEventListener('DOMContentLoaded', ensureTitlebar, { once: true });
         }
-        "#
+        "#);
+        s
     }
 }

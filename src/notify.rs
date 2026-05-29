@@ -19,6 +19,7 @@ use anyhow::{anyhow, Result};
 use notify_rust::{Hint, Notification};
 use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
+use rust_i18n::t;
 use serde::Deserialize;
 #[cfg(all(not(windows), not(target_os = "linux")))]
 use tauri_plugin_notification::NotificationExt;
@@ -28,13 +29,24 @@ pub type NotificationClickHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(windows)]
 const WINDOWS_APP_ID: &str = "moe.taiho.alas-launcher.notification";
-const WINDOWS_APP_NAME: &str = "有新的信息喵";
 
+#[cfg(windows)]
 const WINDOWS_APP_ID_UPDATE: &str = "moe.taiho.alas-launcher.notification.update";
-const WINDOWS_APP_NAME_UPDATE: &str = "有新的更新喵";
 
+#[cfg(windows)]
 const WINDOWS_APP_ID_ANNOUNCEMENT: &str = "moe.taiho.alas-launcher.notification.announcement";
-const WINDOWS_APP_NAME_ANNOUNCEMENT: &str = "有新的公告喵";
+
+fn windows_app_name() -> String {
+    t!("notify.info_app_name").to_string()
+}
+
+fn windows_app_name_update() -> String {
+    t!("notify.update_app_name").to_string()
+}
+
+fn windows_app_name_announcement() -> String {
+    t!("notify.announcement_app_name").to_string()
+}
 
 #[cfg(windows)]
 const WINDOWS_NOTIFICATION_ICON: &[u8] = include_bytes!("../icons/icon.png");
@@ -157,27 +169,33 @@ fn show_notification(
 
     let (title, notify_type) = if let Some(v) = updata {
         if v.as_bool() == Some(true) || v.as_str() == Some("true") || v.as_str() == Some("ture") {
-            ("有新的更新喵~".to_owned(), NotificationType::Update)
+            (
+                t!("notify.update_title").to_string(),
+                NotificationType::Update,
+            )
         } else if v.as_bool() == Some(false)
             || v.as_str() == Some("false")
             || v.as_str() == Some("fl")
         {
-            ("有新的公告喵~".to_owned(), NotificationType::Announcement)
+            (
+                t!("notify.announcement_title").to_string(),
+                NotificationType::Announcement,
+            )
         } else {
             (
-                clean_text(title).unwrap_or_else(|| "AzurPilot".to_owned()),
+                clean_text(title).unwrap_or_else(|| t!("notify.default_title").to_string()),
                 NotificationType::Normal,
             )
         }
     } else {
         (
-            clean_text(title).unwrap_or_else(|| "AzurPilot".to_owned()),
+            clean_text(title).unwrap_or_else(|| t!("notify.default_title").to_string()),
             NotificationType::Normal,
         )
     };
     let body = clean_text(content)
         .or_else(|| clean_text(instance).map(|instance| format!("Instance: {instance}")))
-        .unwrap_or_else(|| "New notification".to_owned());
+        .unwrap_or_else(|| t!("notify.default_body").to_string());
 
     #[cfg(windows)]
     {
@@ -212,20 +230,20 @@ fn show_windows_notification(
     on_click: NotificationClickHandler,
 ) -> Result<()> {
     let (app_id, app_name) = match notify_type {
-        NotificationType::Normal => (WINDOWS_APP_ID, WINDOWS_APP_NAME),
-        NotificationType::Update => (WINDOWS_APP_ID_UPDATE, WINDOWS_APP_NAME_UPDATE),
+        NotificationType::Normal => (WINDOWS_APP_ID, windows_app_name()),
+        NotificationType::Update => (WINDOWS_APP_ID_UPDATE, windows_app_name_update()),
         NotificationType::Announcement => {
-            (WINDOWS_APP_ID_ANNOUNCEMENT, WINDOWS_APP_NAME_ANNOUNCEMENT)
+            (WINDOWS_APP_ID_ANNOUNCEMENT, windows_app_name_announcement())
         }
     };
 
-    let icon_path = ensure_windows_app_user_model_id(app_id, app_name)?;
+    let icon_path = ensure_windows_app_user_model_id(app_id, &app_name)?;
     let icon_uri_path = icon_path.to_string_lossy().replace('\\', "/");
     tauri_winrt_notification::Toast::new(app_id)
         .icon(
             Path::new(&icon_uri_path),
             tauri_winrt_notification::IconCrop::Square,
-            app_name,
+            &app_name,
         )
         .title(title)
         .text1(body)
@@ -283,7 +301,7 @@ fn show_linux_notification(
         .summary(title)
         .body(body)
         .auto_icon()
-        .action("default", "Open")
+        .action("default", &t!("notify.open").to_string())
         .hint(Hint::Resident(true));
     let handle = notification.show()?;
 

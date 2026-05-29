@@ -18,6 +18,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
+use rust_i18n::t;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SplashUpdate {
@@ -31,7 +32,7 @@ pub struct SplashUpdate {
 impl SplashUpdate {
     pub fn loading(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
-            subtitle: "正在连接本地服务...".to_owned(),
+            subtitle: t!("setup.connecting").to_string(),
             title: title.into(),
             detail: detail.into(),
             progress: progress.min(100),
@@ -41,7 +42,7 @@ impl SplashUpdate {
 
     pub fn error(title: impl Into<String>, detail: impl Into<String>, progress: u8) -> Self {
         Self {
-            subtitle: "连接失败".to_owned(),
+            subtitle: t!("setup.connection_failed").to_string(),
             title: title.into(),
             detail: detail.into(),
             progress: progress.min(100),
@@ -55,31 +56,13 @@ impl SplashUpdate {
     }
 }
 
-const TIPS: &[&str] = &[
-    "指挥官，今天也要加油哦！",
-    "听说给舰娘送戒指能变强？",
-    "每日任务记得领，蚊子腿也是肉。",
-    "后宅的食物记得补充，不然舰娘会饿肚子的。",
-    "科研项目虽然慢，但那是变强的必经之路。",
-    "不要忘记每日的免费建造哦（虽然大都是狗粮）。",
-    "AzurPilot 正在努力为你打工，请稍等片刻。",
-    "正在试图潜入塞壬据点...",
-    "正在调配燃油，请指挥官稍后...",
-    "正在说服蛮啾们加快进度...",
-    "适当的休息也是指挥官工作的一部分哦。",
-    "听说点击看板娘会有惊喜？",
-    "维护补偿的魔方和物资已经... 还没发，再等会儿。",
-    "正在拦截塞壬的干扰信号...",
-    "正在分析塞壬的技术矩阵...",
-    "皇家的红茶已经泡好了，指挥官要来一杯吗？",
-    "白鹰的派对已经准备就绪，就等指挥官了。",
-    "重樱的樱花落了，但我们的奋斗才刚开始。",
-    "铁血的科技世界第一！",
-];
+const TIPS_COUNT: usize = 19;
 
 pub fn get_tip() -> String {
     let now = Local::now().timestamp() as usize;
-    TIPS[now % TIPS.len()].to_string()
+    let idx = now % TIPS_COUNT;
+    let key = format!("tips.{idx}");
+    t!(&key).to_string()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -240,10 +223,10 @@ fn bootstrap_uv_path() -> Result<PathBuf> {
             if let Some(path_uv) = find_on_path("uv") {
                 return Ok(path_uv);
             }
-            bail!("启动器未内置 uv，且系统 PATH 中找不到 uv");
+            bail!(t!("errors.uv_not_found"));
         }
         fs::write(&path, BOOTSTRAP_UV)
-            .with_context(|| format!("写入内置 uv 到 {} 失败", path.display()))?;
+            .with_context(|| t!("errors.write_uv_failed", path = path.display().to_string()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -319,8 +302,12 @@ pub fn setup_alas_repo(
     setup_git_ca_bundle();
     // Similar setup to deploy/installer.py
     status_updater(
-        SplashUpdate::loading("准备工作区", "正在清理缓存并检查本地环境。", 8)
-            .with_subtitle(format!("检查本地环境中... | Tips：{}", get_tip())),
+        SplashUpdate::loading(
+            t!("setup.preparing_workspace"),
+            t!("setup.cleaning_cache"),
+            8,
+        )
+        .with_subtitle(t!("setup.checking_env", tip = get_tip())),
     );
     let bootstrap_uv = bootstrap_uv_path()?;
     ensure_runtime_tools(&bootstrap_uv, &cancel_requested, &mut status_updater)?;
@@ -330,31 +317,27 @@ pub fn setup_alas_repo(
         info!("Skipping AzurPilot repository update because preview no-update mode is enabled");
         status_updater(
             SplashUpdate::loading(
-                "跳过更新",
-                "已通过启动参数跳过仓库更新，正在使用本地文件继续启动。",
+                t!("setup.skipping_update"),
+                t!("setup.skipping_update_detail"),
                 18,
             )
-            .with_subtitle(format!("预览模式中... | Tips：{}", get_tip())),
+            .with_subtitle(t!("setup.preview_mode", tip = get_tip())),
         );
     } else {
         status_updater(
-            SplashUpdate::loading("正在更新", "正在获取最新补丁包", 18)
-                .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
+            SplashUpdate::loading(t!("setup.updating"), t!("setup.fetching_patches"), 18)
+                .with_subtitle(t!("setup.syncing", tip = get_tip())),
         );
         git_update(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
     }
     status_updater(
-        SplashUpdate::loading(
-            "安装依赖库",
-            "正在验证 AzurPilot 运行所需的 Python 依赖包。",
-            64,
-        )
-        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
+        SplashUpdate::loading(t!("setup.installing_deps"), t!("setup.verifying_deps"), 64)
+            .with_subtitle(t!("setup.syncing_deps", tip = get_tip())),
     );
     uv_sync_project(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
     status_updater(
-        SplashUpdate::loading("完成启动", "本地界面已准备就绪，即将打开主窗口。", 94)
-            .with_subtitle(format!("启动服务中... | Tips：{}", get_tip())),
+        SplashUpdate::loading(t!("setup.finishing"), t!("setup.ready_to_launch"), 94)
+            .with_subtitle(t!("setup.launching", tip = get_tip())),
     );
     Ok(())
 }
@@ -376,14 +359,14 @@ pub fn cleanup_runtime_for_rebuild() -> Result<()> {
     let repo_dir = repo_dir.canonicalize()?;
     let exe_dir = current_exe
         .parent()
-        .ok_or_else(|| anyhow!("无法获取启动器所在目录"))?
+        .ok_or_else(|| anyhow!(t!("errors.launcher_dir_not_found")))?
         .canonicalize()?;
     if !cleanup_target_belongs_to_launcher(&repo_dir, &exe_dir) {
-        bail!(
-            "拒绝清理非启动器目录：{} != {}",
-            repo_dir.display(),
-            exe_dir.display()
-        );
+        bail!(t!(
+            "errors.refuse_cleanup",
+            actual = repo_dir.display().to_string(),
+            expected = exe_dir.display().to_string()
+        ));
     }
 
     kill_runtime_processes(&repo_dir);
@@ -405,7 +388,10 @@ pub fn cleanup_runtime_for_rebuild() -> Result<()> {
     }
 
     if !failures.is_empty() {
-        bail!("部分文件清理失败：\n{}", failures.join("\n"));
+        bail!(t!(
+            "errors.partial_cleanup_failed",
+            errors = failures.join("\n")
+        ));
     }
 
     Ok(())
@@ -419,9 +405,14 @@ fn clean_uv_cache() -> Result<()> {
         .env("UV_NO_PROGRESS", "1")
         .create_no_window()
         .status()
-        .with_context(|| format!("执行 uv 缓存清理失败：{}", uv.display()))?;
+        .with_context(|| {
+            t!(
+                "errors.uv_cache_cleanup_failed",
+                error = uv.display().to_string()
+            )
+        })?;
     if !status.success() {
-        bail!("uv 缓存清理失败");
+        bail!(t!("errors.uv_cache_failed"));
     }
     Ok(())
 }
@@ -504,9 +495,19 @@ fn remove_runtime_entry(path: &Path) -> Result<()> {
         for entry in fs::read_dir(path)? {
             remove_runtime_entry(&entry?.path())?;
         }
-        fs::remove_dir(path).with_context(|| format!("删除目录失败：{}", path.display()))?;
+        fs::remove_dir(path).with_context(|| {
+            t!(
+                "errors.delete_dir_failed",
+                error = path.display().to_string()
+            )
+        })?;
     } else {
-        fs::remove_file(path).with_context(|| format!("删除文件失败：{}", path.display()))?;
+        fs::remove_file(path).with_context(|| {
+            t!(
+                "errors.delete_file_failed",
+                error = path.display().to_string()
+            )
+        })?;
     }
     Ok(())
 }
@@ -526,7 +527,12 @@ fn remove_runtime_entry_with_retry(path: &Path) -> Result<()> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("删除失败：{}", path.display())))
+    Err(last_error.unwrap_or_else(|| {
+        anyhow!(t!(
+            "errors.delete_failed",
+            error = path.display().to_string()
+        ))
+    }))
 }
 
 fn clear_readonly(path: &Path) -> Result<()> {
@@ -537,7 +543,7 @@ fn clear_readonly(path: &Path) -> Result<()> {
     if permissions.readonly() {
         permissions.set_readonly(false);
         fs::set_permissions(path, permissions)
-            .with_context(|| format!("修改只读权限失败：{}", path.display()))?;
+            .with_context(|| t!("errors.chmod_failed", error = path.display().to_string()))?;
     }
     Ok(())
 }
@@ -624,7 +630,7 @@ fn run_command(
         if cancel_requested.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("启动已取消，正在清理环境");
+            bail!(t!("setup.cancel_cleaning"));
         }
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok((is_err, line)) => {
@@ -669,8 +675,8 @@ fn run_command(
     if !status.success() {
         if last_err.is_empty() {
             last_err = match phase {
-                ScriptPhase::Git => "更新 AzurPilot 失败".to_owned(),
-                ScriptPhase::Dependencies { .. } => "更新依赖库失败".to_owned(),
+                ScriptPhase::Git => t!("setup.update_failed").to_string(),
+                ScriptPhase::Dependencies { .. } => t!("setup.deps_failed").to_string(),
             };
         }
         return Err(anyhow!(last_err));
@@ -686,7 +692,7 @@ fn run_command_with_retry(
 ) -> Result<()> {
     for retry in 0..=MAX_UPDATE_RETRIES {
         if cancel_requested.load(Ordering::SeqCst) {
-            bail!("启动已取消，正在清理环境");
+            bail!(t!("setup.cancel_cleaning"));
         }
 
         match run_command(
@@ -733,7 +739,7 @@ fn run_status_command_with_tick(
         if cancel_requested.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("启动已取消，正在清理环境");
+            bail!(t!("setup.cancel_cleaning"));
         }
 
         if let Some(status) = child.try_wait()? {
@@ -744,21 +750,27 @@ fn run_status_command_with_tick(
     }
 }
 
-fn phase_display_name(phase: ScriptPhase) -> &'static str {
+fn phase_display_name(phase: ScriptPhase) -> String {
     match phase {
-        ScriptPhase::Git => "代码更新",
-        ScriptPhase::Dependencies { .. } => "依赖更新",
+        ScriptPhase::Git => t!("setup.code_update").to_string(),
+        ScriptPhase::Dependencies { .. } => t!("setup.deps_update").to_string(),
     }
 }
 
 fn splash_retry_update(phase: ScriptPhase, retry_count: usize, error_text: &str) -> SplashUpdate {
-    let detail =
-        format!("重试失败 ({retry_count}/{MAX_UPDATE_RETRIES})，1秒后再次尝试：{error_text}");
+    let detail = t!(
+        "setup.retry_detail",
+        count = retry_count.to_string(),
+        max = MAX_UPDATE_RETRIES.to_string(),
+        error = error_text
+    );
     match phase {
-        ScriptPhase::Git => SplashUpdate::loading("正在更新 AzurPilot", detail, 18)
-            .with_subtitle(format!("同步仓库中... | Tips：{}", get_tip())),
-        ScriptPhase::Dependencies { .. } => SplashUpdate::loading("安装依赖库", detail, 64)
-            .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip())),
+        ScriptPhase::Git => SplashUpdate::loading(t!("setup.retrying_update"), detail, 18)
+            .with_subtitle(t!("setup.syncing", tip = get_tip())),
+        ScriptPhase::Dependencies { .. } => {
+            SplashUpdate::loading(t!("setup.retrying_deps"), detail, 64)
+                .with_subtitle(t!("setup.syncing_deps", tip = get_tip()))
+        }
     }
 }
 
@@ -766,13 +778,13 @@ fn dependency_wait_update(elapsed_secs: u16, current_progress: u8) -> SplashUpda
     let synthetic_progress = (64 + (elapsed_secs / 4) as u8).min(89);
     let progress = current_progress.max(synthetic_progress);
     let detail = if elapsed_secs < 10 {
-        "uv 正在解析和同步依赖，请稍候。".to_owned()
+        t!("setup.uv_parsing").to_string()
     } else {
-        format!("uv 正在同步依赖，已运行约 {elapsed_secs} 秒。")
+        t!("setup.uv_syncing", secs = elapsed_secs.to_string()).to_string()
     };
 
-    SplashUpdate::loading("安装依赖库", detail, progress)
-        .with_subtitle(format!("同步依赖包中... | Tips：{}", get_tip()))
+    SplashUpdate::loading(t!("setup.installing_deps"), detail, progress)
+        .with_subtitle(t!("setup.syncing_deps", tip = get_tip()))
 }
 
 fn git_update(
@@ -936,9 +948,13 @@ fn atomic_failure_cleanup(path: &str, cancel_requested: &AtomicBool) -> Result<(
     Ok(())
 }
 
-fn runtime_tools_update(title: &str, detail: impl Into<String>, progress: u8) -> SplashUpdate {
+fn runtime_tools_update(
+    title: impl Into<String>,
+    detail: impl Into<String>,
+    progress: u8,
+) -> SplashUpdate {
     SplashUpdate::loading(title, detail, progress)
-        .with_subtitle(format!("重建运行环境中... | Tips：{}", get_tip()))
+        .with_subtitle(t!("setup.rebuilding_env", tip = get_tip()).to_string())
 }
 
 fn runtime_wait_update(
@@ -951,9 +967,14 @@ fn runtime_wait_update(
     let elapsed_secs = elapsed_ticks / 10;
     let progress = scale_progress(elapsed_secs.min(120) as u8, start_progress, end_progress);
     let detail = if elapsed_secs < 8 {
-        format!("{action}，请稍候。")
+        t!("setup.action_wait", action = action).to_string()
     } else {
-        format!("{action}，已运行约 {elapsed_secs} 秒。")
+        t!(
+            "setup.action_elapsed",
+            action = action,
+            secs = elapsed_secs.to_string()
+        )
+        .to_string()
     };
     runtime_tools_update(title, detail, progress)
 }
@@ -964,16 +985,16 @@ fn ensure_runtime_tools(
     mut status_updater: impl FnMut(SplashUpdate),
 ) -> Result<()> {
     status_updater(runtime_tools_update(
-        "准备运行环境",
-        "正在检查内置 Python 和基础工具。",
+        t!("setup.preparing_env"),
+        t!("setup.checking_python"),
         9,
     ));
     ensure_self_contained_python(bootstrap_uv, cancel_requested, &mut status_updater)?;
     ensure_deploy_python_dependencies(bootstrap_uv, cancel_requested, &mut status_updater)?;
 
     status_updater(runtime_tools_update(
-        "准备运行环境",
-        "正在复制启动器运行所需工具。",
+        t!("setup.preparing_env"),
+        t!("setup.copying_tools"),
         16,
     ));
     copy_file_if_exists(bootstrap_uv, &venv_uv())?;
@@ -999,8 +1020,8 @@ fn ensure_deploy_python_dependencies(
     mut status_updater: impl FnMut(SplashUpdate),
 ) -> Result<()> {
     status_updater(runtime_tools_update(
-        "准备运行环境",
-        "正在检查 deploy 基础依赖 requests。",
+        t!("setup.preparing_env"),
+        t!("setup.checking_requests"),
         14,
     ));
     let mut import_check = Command::new(venv_python());
@@ -1012,8 +1033,8 @@ fn ensure_deploy_python_dependencies(
 
     let mut cmd = Command::new(bootstrap_uv);
     status_updater(runtime_tools_update(
-        "准备运行环境",
-        "正在安装 deploy 基础依赖 requests。",
+        t!("setup.preparing_env"),
+        t!("setup.installing_requests"),
         15,
     ));
     cmd.args(["pip", "install", "--python"])
@@ -1029,8 +1050,8 @@ fn ensure_deploy_python_dependencies(
         elapsed_ticks = elapsed_ticks.saturating_add(1);
         if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
             status_updater(runtime_wait_update(
-                "准备运行环境",
-                "正在安装 deploy 基础依赖 requests",
+                &t!("setup.preparing_env"),
+                &t!("setup.installing_requests"),
                 elapsed_ticks,
                 15,
                 16,
@@ -1038,7 +1059,7 @@ fn ensure_deploy_python_dependencies(
         }
     })?;
     if !status.success() {
-        bail!("安装 deploy 基础依赖 requests 失败");
+        bail!(t!("errors.requests_install_failed"));
     }
     Ok(())
 }
@@ -1071,8 +1092,8 @@ fn ensure_self_contained_python(
     mut status_updater: impl FnMut(SplashUpdate),
 ) -> Result<()> {
     status_updater(runtime_tools_update(
-        "准备运行环境",
-        format!("正在检查 Python {PYTHON_VERSION}。"),
+        t!("setup.preparing_env"),
+        t!("setup.checking_python_version", version = PYTHON_VERSION),
         10,
     ));
     if venv_python_works() && managed_python_executable().is_some() {
@@ -1081,21 +1102,27 @@ fn ensure_self_contained_python(
 
     if managed_python_executable().is_none() {
         fs::create_dir_all(venv_python_install_dir()).with_context(|| {
-            format!(
-                "创建 Python 安装目录失败：{}",
-                venv_python_install_dir().display()
+            t!(
+                "errors.python_dir_failed",
+                error = venv_python_install_dir().display().to_string()
             )
         })?;
         let mirrors = uv_python_install_mirrors();
         let mut downloaded = false;
         for (index, mirror) in mirrors.iter().enumerate() {
-            let mirror_label = if index == 0 { "主源" } else { "备用源" };
+            let mirror_label = if index == 0 {
+                t!("setup.primary_mirror").to_string()
+            } else {
+                t!("setup.fallback_mirror").to_string()
+            };
             status_updater(runtime_tools_update(
-                "下载 Python",
-                format!(
-                    "正在下载 Python {PYTHON_VERSION}，正在尝试{mirror_label}（{}/{}）。",
-                    index + 1,
-                    mirrors.len()
+                t!("setup.download_python_title"),
+                t!(
+                    "setup.downloading_python",
+                    version = PYTHON_VERSION,
+                    mirror = mirror_label,
+                    current = (index + 1).to_string(),
+                    total = mirrors.len().to_string()
                 ),
                 11,
             ));
@@ -1115,8 +1142,8 @@ fn ensure_self_contained_python(
                 elapsed_ticks = elapsed_ticks.saturating_add(1);
                 if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
                     status_updater(runtime_wait_update(
-                        "下载 Python",
-                        &format!("正在下载 Python {PYTHON_VERSION}"),
+                        &t!("setup.download_python_title"),
+                        &t!("setup.downloading_python_action", version = PYTHON_VERSION),
                         elapsed_ticks,
                         11,
                         13,
@@ -1127,18 +1154,28 @@ fn ensure_self_contained_python(
                 downloaded = true;
                 break;
             }
-            warn!("下载 Python {PYTHON_VERSION} 失败，镜像：{mirror}");
+            warn!(
+                "{}",
+                t!(
+                    "errors.download_python_failed_mirror",
+                    version = PYTHON_VERSION,
+                    mirror = mirror
+                )
+            );
         }
         if !downloaded {
-            bail!("下载 Python {PYTHON_VERSION} 失败");
+            bail!(t!(
+                "errors.python_download_failed",
+                version = PYTHON_VERSION
+            ));
         }
     }
 
     let managed_python = managed_python_executable()
-        .ok_or_else(|| anyhow!("找不到 .venv 内的 Python {PYTHON_VERSION}"))?;
+        .ok_or_else(|| anyhow!(t!("errors.python_not_found", version = PYTHON_VERSION)))?;
     status_updater(runtime_tools_update(
-        "创建虚拟环境",
-        "正在创建 .venv 并绑定内置 Python。",
+        t!("setup.creating_venv_title"),
+        t!("setup.creating_venv"),
         13,
     ));
     reset_virtualenv_layout()?;
@@ -1149,7 +1186,7 @@ fn ensure_self_contained_python(
     uv_python_env(&mut cmd);
     let status = run_status_command(&mut cmd, cancel_requested)?;
     if !status.success() {
-        bail!("创建 .venv 失败");
+        bail!(t!("errors.venv_create_failed"));
     }
     Ok(())
 }
@@ -1165,8 +1202,12 @@ fn reset_virtualenv_layout() -> Result<()> {
     for entry in entries {
         let path = venv.join(entry);
         if path.exists() {
-            remove_runtime_entry_with_retry(&path)
-                .with_context(|| format!("重置 .venv 结构失败：{}", path.display()))?;
+            remove_runtime_entry_with_retry(&path).with_context(|| {
+                t!(
+                    "errors.reset_venv_failed",
+                    error = path.display().to_string()
+                )
+            })?;
         }
     }
 
@@ -1225,11 +1266,20 @@ fn copy_file_if_exists(from: &Path, to: &Path) -> Result<()> {
         return Ok(());
     }
     if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建目录 {} 失败", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            t!(
+                "errors.create_dir_failed",
+                path = parent.display().to_string()
+            )
+        })?;
     }
-    fs::copy(from, to)
-        .with_context(|| format!("复制文件失败：{} -> {}", from.display(), to.display()))?;
+    fs::copy(from, to).with_context(|| {
+        t!(
+            "errors.copy_file_failed",
+            src = from.display().to_string(),
+            dest = to.display().to_string()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1241,17 +1291,34 @@ fn copy_file_if_exists(from: &Path, to: &Path) -> Result<()> {
 }
 
 fn files_match(left: &Path, right: &Path) -> Result<bool> {
-    let left_metadata =
-        fs::metadata(left).with_context(|| format!("读取文件信息失败：{}", left.display()))?;
-    let right_metadata =
-        fs::metadata(right).with_context(|| format!("读取文件信息失败：{}", right.display()))?;
+    let left_metadata = fs::metadata(left).with_context(|| {
+        t!(
+            "errors.read_info_failed",
+            error = left.display().to_string()
+        )
+    })?;
+    let right_metadata = fs::metadata(right).with_context(|| {
+        t!(
+            "errors.read_info_failed",
+            error = right.display().to_string()
+        )
+    })?;
     if left_metadata.len() != right_metadata.len() {
         return Ok(false);
     }
 
-    let left_bytes = fs::read(left).with_context(|| format!("读取文件失败：{}", left.display()))?;
-    let right_bytes =
-        fs::read(right).with_context(|| format!("读取文件失败：{}", right.display()))?;
+    let left_bytes = fs::read(left).with_context(|| {
+        t!(
+            "errors.read_file_failed",
+            error = left.display().to_string()
+        )
+    })?;
+    let right_bytes = fs::read(right).with_context(|| {
+        t!(
+            "errors.read_file_failed",
+            error = right.display().to_string()
+        )
+    })?;
     Ok(left_bytes == right_bytes)
 }
 
@@ -1362,7 +1429,7 @@ fn splash_update_for_output(
 }
 
 fn splash_update_for_git_output(line: &str, state: &mut GitProgressState) -> Option<SplashUpdate> {
-    let subtitle = format!("同步仓库中... | Tips：{}", get_tip());
+    let subtitle = t!("setup.syncing", tip = get_tip()).to_string();
 
     if line.contains("=====") {
         let detail = line.replace('=', " ");
@@ -1396,7 +1463,7 @@ fn git_update_splash(
     } else {
         detail
     };
-    SplashUpdate::loading("正在更新 AzurPilot", display_detail, state.progress)
+    SplashUpdate::loading(t!("setup.retrying_update"), display_detail, state.progress)
         .with_subtitle(subtitle)
 }
 
@@ -1442,11 +1509,13 @@ fn splash_update_for_dependency_output(
     total_packages: usize,
     seen_packages: &mut HashSet<String>,
 ) -> Option<SplashUpdate> {
-    let subtitle = format!("同步依赖包中... | Tips：{}", get_tip());
+    let subtitle = t!("setup.syncing_deps", tip = get_tip()).to_string();
 
     // UV: resolution complete
+    let deps_title = t!("setup.installing_deps");
+
     if line.starts_with("Resolved ") {
-        return Some(SplashUpdate::loading("安装依赖库", line, 70).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, 70).with_subtitle(subtitle));
     }
 
     // UV: downloading a package
@@ -1455,27 +1524,27 @@ fn splash_update_for_dependency_output(
             seen_packages.insert(pkg);
         }
         let progress = uv_download_progress(seen_packages.len(), total_packages);
-        return Some(SplashUpdate::loading("安装依赖库", line, progress).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, progress).with_subtitle(subtitle));
     }
 
     // UV: preparation complete
     if line.starts_with("Prepared ") {
-        return Some(SplashUpdate::loading("安装依赖库", line, 84).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, 84).with_subtitle(subtitle));
     }
 
     // UV: install phase complete
     if line.starts_with("Installed ") {
-        return Some(SplashUpdate::loading("安装依赖库", line, 88).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, 88).with_subtitle(subtitle));
     }
 
     // UV: per-package install confirmation (+ pkg==version) from stdout
     if line.starts_with("+ ") {
-        return Some(SplashUpdate::loading("安装依赖库", line, 90).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, 90).with_subtitle(subtitle));
     }
 
     // UV: everything already up to date
     if line.starts_with("Audited ") {
-        return Some(SplashUpdate::loading("安装依赖库", line, 90).with_subtitle(subtitle));
+        return Some(SplashUpdate::loading(deps_title, line, 90).with_subtitle(subtitle));
     }
 
     None
