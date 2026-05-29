@@ -77,6 +77,9 @@ launcher_update:
   restart_status: "再起動を準備中..."
   failed: "ランチャーの更新に失敗しました"
   failed_detail: "ランチャーの更新が完了するまで、実行環境の修復は行いません。\n\n%{error}"
+  mini_check_failed: "ミニ版ランチャーは先に完全版へ更新する必要がありますが、更新を確認できませんでした：%{error}"
+  mini_update_missing: "ミニ版ランチャーは先に完全版へ更新する必要がありますが、更新サーバーからより新しいバージョンが返されませんでした。現在：%{current}、最新：%{latest}"
+  mini_payload_missing: "ミニ版ランチャーは先に完全版へ更新する必要がありますが、%{platform} 用のランチャーパッケージがありません。"
 
 dialog:
   cleaning_env: "環境をクリーンアップ中"

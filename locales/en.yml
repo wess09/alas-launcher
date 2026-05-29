@@ -77,6 +77,9 @@ launcher_update:
   restart_status: "Preparing restart..."
   failed: "Launcher update failed"
   failed_detail: "The launcher must finish updating before repairing the runtime environment.\n\n%{error}"
+  mini_check_failed: "The mini launcher must update to the full launcher first, but update check failed: %{error}"
+  mini_update_missing: "The mini launcher must update to the full launcher first, but the update server did not return a newer version. Current: %{current}, latest: %{latest}"
+  mini_payload_missing: "The mini launcher must update to the full launcher first, but no launcher package was provided for %{platform}."
 
 dialog:
   cleaning_env: "Cleaning environment"

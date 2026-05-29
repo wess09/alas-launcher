@@ -87,6 +87,7 @@ const SPLASH_URL: &str = "alas-splash://localhost/";
 const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
 const LAUNCHER_UPDATE_URL: &str = "https://alas.nanoda.work/updata/stable.json";
 const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
+const MINI_LAUNCHER_VERSION: &str = "0.0.1";
 const LAUNCHER_UPDATE_MIN_PARALLEL_BYTES: u64 = 4 * 1024 * 1024;
 const LAUNCHER_UPDATE_MAX_CHUNK_BYTES: u64 = 500 * 1024;
 const LAUNCHER_UPDATE_MIN_CHUNK_BYTES: u64 = 64 * 1024;
@@ -347,6 +348,10 @@ fn launcher_update_http_client(timeout: Option<Duration>) -> Result<Client> {
     Ok(builder.build()?)
 }
 
+fn launcher_version_is_mini(version: &str) -> bool {
+    version.strip_prefix('v').unwrap_or(version) == MINI_LAUNCHER_VERSION
+}
+
 fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate)) -> Result<bool> {
     if std::env::var_os(LAUNCHER_UPDATE_SKIP_ENV).is_some() {
         info!("Skipping launcher update check after restart");
@@ -354,11 +359,19 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
         return Ok(false);
     }
 
+    let current_version = env!("CARGO_PKG_VERSION");
+    let mini_launcher = launcher_version_is_mini(current_version);
     let platform_key = launcher_update_platform_key();
     let manifest_client = match launcher_update_http_client(Some(Duration::from_secs(10))) {
         Ok(client) => client,
         Err(err) => {
             warn!("Unable to create launcher update client: {err:#}");
+            if mini_launcher {
+                return Err(anyhow!(t!(
+                    "launcher_update.mini_check_failed",
+                    error = format!("{err:#}")
+                )));
+            }
             return Ok(false);
         }
     };
@@ -372,6 +385,12 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
         Ok(text) => text,
         Err(err) => {
             warn!("Unable to fetch launcher update manifest: {err:#}");
+            if mini_launcher {
+                return Err(anyhow!(t!(
+                    "launcher_update.mini_check_failed",
+                    error = format!("{err:#}")
+                )));
+            }
             return Ok(false);
         }
     };
@@ -379,20 +398,38 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
         Ok(manifest) => manifest,
         Err(err) => {
             warn!("Unable to parse launcher update manifest: {err:#}");
+            if mini_launcher {
+                return Err(anyhow!(t!(
+                    "launcher_update.mini_check_failed",
+                    error = format!("{err:#}")
+                )));
+            }
             return Ok(false);
         }
     };
-    let current_version = env!("CARGO_PKG_VERSION");
     if !launcher_version_is_newer(current_version, &manifest.version) {
         info!(
             "Launcher is up to date: current={}, latest={}",
             current_version, manifest.version
         );
+        if mini_launcher {
+            return Err(anyhow!(t!(
+                "launcher_update.mini_update_missing",
+                current = current_version,
+                latest = manifest.version
+            )));
+        }
         return Ok(false);
     }
 
     let Some(platform) = manifest.platforms.get(platform_key) else {
         warn!("No launcher update payload for platform {platform_key}");
+        if mini_launcher {
+            return Err(anyhow!(t!(
+                "launcher_update.mini_payload_missing",
+                platform = platform_key
+            )));
+        }
         return Ok(false);
     };
 

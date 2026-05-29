@@ -77,6 +77,9 @@ launcher_update:
   restart_status: "準備重新啟動..."
   failed: "啟動器更新失敗"
   failed_detail: "啟動器必須先完成更新，暫不修復執行環境。\n\n%{error}"
+  mini_check_failed: "迷你版啟動器必須先更新為完整版，但無法檢查更新：%{error}"
+  mini_update_missing: "迷你版啟動器必須先更新為完整版，但更新伺服器沒有返回更高版本。目前版本：%{current}，最新版本：%{latest}"
+  mini_payload_missing: "迷你版啟動器必須先更新為完整版，但更新伺服器沒有提供 %{platform} 的啟動器包。"
 
 dialog:
   cleaning_env: "正在清理環境"
