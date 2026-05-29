@@ -76,6 +76,23 @@ const LAUNCHER_UPDATE_URL: &str = "https://alas.nanoda.work/updata/stable.json";
 const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
 #[cfg(windows)]
 const LAUNCHER_UPDATE_NO_CONSOLE_ENV: &str = "AZURPILOT_NO_ATTACH_CONSOLE";
+const PREVIEW_NO_UPDATE_ARGS: &[&str] = &[
+    "--preview-no-update",
+    "--skip-update",
+    "--no-update",
+    "--disable-update",
+    "/preview-no-update",
+    "/skip-update",
+    "/no-update",
+];
+const PREVIEW_CRASH_ARGS: &[&str] = &[
+    "--preview-crash",
+    "--preview-error",
+    "--crash-preview",
+    "--error-preview",
+    "/preview-crash",
+    "/preview-error",
+];
 
 #[derive(Clone, Debug)]
 struct TimeBombConfig {
@@ -407,6 +424,21 @@ fn parse_launcher_version(version: &str) -> (u64, u64, u64, u64) {
     (major, minor, patch, suffix_rank)
 }
 
+fn launcher_arg_present(flags: &[&str]) -> bool {
+    std::env::args().skip(1).any(|arg| {
+        let arg = arg.to_ascii_lowercase();
+        flags.iter().any(|flag| arg == *flag)
+    })
+}
+
+fn preview_no_update_arg_present() -> bool {
+    launcher_arg_present(PREVIEW_NO_UPDATE_ARGS)
+}
+
+fn preview_crash_arg_present() -> bool {
+    launcher_arg_present(PREVIEW_CRASH_ARGS)
+}
+
 fn launcher_update_temp_path(current_exe: &Path) -> PathBuf {
     let file_name = current_exe
         .file_name()
@@ -537,16 +569,25 @@ fn main() -> Result<()> {
     }
     setup_environment()?;
     let _log_guard = initialize_logging()?;
+    let preview_crash = preview_crash_arg_present();
+    let preview_no_update = preview_crash || preview_no_update_arg_present();
 
     info!("=== AzurPilot starting ===");
     info!("Launcher log file: log/{}", today_launcher_log_filename());
-    match check_launcher_update_and_restart() {
-        Ok(true) => {
-            info!("Launcher update installed, restarting");
-            return Ok(());
+    if preview_no_update {
+        info!("Preview no-update mode enabled; skipping launcher update check");
+    } else {
+        match check_launcher_update_and_restart() {
+            Ok(true) => {
+                info!("Launcher update installed, restarting");
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => warn!("Launcher update check failed: {e:#}"),
         }
-        Ok(false) => {}
-        Err(e) => warn!("Launcher update check failed: {e:#}"),
+    }
+    if preview_crash {
+        info!("Preview crash mode enabled; splash will stop on an artificial error state");
     }
 
     let deploy_config = get_deploy_config();
@@ -762,9 +803,27 @@ fn main() -> Result<()> {
                             "本地 Web 界面正在初始化，准备就绪后将自动打开窗口。",
                             4,
                         ).with_subtitle(format!("正在初始化... | Tips:{}", crate::setup::get_tip())));
-                        if let Err(e) =
-                            setup_alas_repo(&mut status_updater, setup_cancel_requested.clone())
-                        {
+                        if preview_crash {
+                            status_updater(
+                                SplashUpdate::error(
+                                    "启动失败",
+                                    "预览崩溃模式已启用。这是用于检查错误界面的模拟故障，不会执行更新或启动后端服务。",
+                                    42,
+                                )
+                                .with_subtitle(format!(
+                                    "错误界面预览中... | Tips：{}",
+                                    crate::setup::get_tip()
+                                )),
+                            );
+                            setup_completed.store(true, Ordering::SeqCst);
+                            setup_running.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        if let Err(e) = setup_alas_repo(
+                            &mut status_updater,
+                            setup_cancel_requested.clone(),
+                            preview_no_update,
+                        ) {
                             error!("{e}");
                             setup_running.store(false, Ordering::SeqCst);
                             if setup_cancel_requested.load(Ordering::SeqCst) {
@@ -1174,12 +1233,37 @@ fn initialize_splash(splash: &WebviewWindow) {
             if let Err(e) = splash.navigate(url) {
                 error!("Failed to navigate splash page: {:?}", e);
             }
-            thread::sleep(Duration::from_millis(150));
+            if !wait_for_splash_ready(splash, Duration::from_secs(2)) {
+                warn!("Timed out waiting for splash page readiness; showing splash anyway");
+            }
+            if let Err(e) = splash.show() {
+                error!("Failed to show splash window: {:?}", e);
+            }
         }
         Err(e) => {
             error!("Failed to parse splash URL: {:?}", e);
         }
     }
+}
+
+fn wait_for_splash_ready(splash: &WebviewWindow, timeout: Duration) -> bool {
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        if splash
+            .eval(
+                r#"
+                if (!window.__ALAS_SPLASH_READY) {
+                    throw new Error("splash page is not ready");
+                }
+                "#,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
@@ -1202,7 +1286,7 @@ fn splash_response() -> tauri::http::Response<Vec<u8>> {
             tauri::http::header::CONTENT_TYPE,
             "text/html; charset=utf-8",
         )
-        .body(splash_shell_html(&light_bg_b64, &dark_bg_b64).into_bytes())
+        .body(splash_redesigned_shell_html(&light_bg_b64, &dark_bg_b64).into_bytes())
         .unwrap()
 }
 
@@ -1573,421 +1657,517 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     )
 }
 
-fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
-    // Splash window uses native decorations, no custom titlebar needed
-    let splash_titlebar = String::new();
-    // No custom titlebar script needed for splash (uses native decorations)
-    let splash_script = String::new();
-    let html = format!(
-        r#"<!doctype html>
-<html>
+fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
+    r#"<!doctype html>
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root {{
-    color-scheme: light dark;
-    --color-background-primary: rgba(255, 255, 255, 0.9);
-    --color-background-secondary: #eef3f8;
-    --color-border-tertiary: rgba(196, 206, 219, 0.92);
-    --color-text-primary: #1f2a37;
-    --color-text-secondary: #617084;
-    --border-radius-lg: 20px;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{
-      --color-background-primary: rgba(31, 41, 55, 0.9);
-      --color-background-secondary: rgba(255, 255, 255, 0.15);
-      --color-border-tertiary: rgba(255, 255, 255, 0.15);
-      --color-text-primary: #f3f4f6;
-      --color-text-secondary: #9ca3af;
-    }}
-    html, body {{
-      background-color: #111827;
-    }}
-    .badge {{
-      background: rgba(59, 130, 246, 0.15) !important;
-      color: #60a5fa !important;
-      border-color: rgba(59, 130, 246, 0.3) !important;
-    }}
-    .badge-err {{
-      background: rgba(239, 68, 68, 0.15) !important;
-      color: #f87171 !important;
-      border-color: rgba(239, 68, 68, 0.3) !important;
-    }}
-    .prog-pct {{
-      color: #60a5fa !important;
-    }}
-    .prog-fill {{
-      background: #3b82f6 !important;
-    }}
-    .splash-log-button {{
-      background: #1f2937 !important;
-      color: #60a5fa !important;
-      border-color: #4b5563 !important;
-    }}
-    .splash-log-button:hover {{
-      background: #374151 !important;
-    }}
-  }}
-  /* Error state style - Beautiful full red screen */
-  body.error-state {{
-    background: #dc2626 !important;
-  }}
-  .error-state .brand-text strong,
-  .error-state .status-body h2 {{
-    color: #ffffff !important;
-  }}
-  .error-state .brand-text span,
-  .error-state .status-body p,
-  .error-state .prog-meta-main,
-  .error-state .prog-pct {{
-    color: rgba(255, 255, 255, 0.8) !important;
-  }}
-  .error-state .divider {{
-    background: rgba(255, 255, 255, 0.2) !important;
-  }}
-  .error-state .badge-err {{
-    background: #ffe4e6 !important;
-    color: #991b1b !important;
-    border-color: #fca5a5 !important;
-  }}
-  .error-state .prog-track {{
-    background: rgba(255, 255, 255, 0.2) !important;
-  }}
-  .error-state .prog-fill-err {{
-    background: #ff4d4d !important;
-  }}
-  .error-state .err-dot {{
-    background: #ffffff !important;
-    color: #dc2626 !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15) !important;
-  }}
-  .error-state .splash-log-button {{
-    background: rgba(255, 255, 255, 0.15) !important;
-    color: #ffffff !important;
-    border-color: rgba(255, 255, 255, 0.3) !important;
-  }}
-  .error-state .splash-log-button:hover {{
-    background: rgba(255, 255, 255, 0.25) !important;
-  }}
-  * {{
+  :root {
+    --primary-color: #4facfe;
+    --secondary-color: #00f2fe;
+    --text-main: #ffffff;
+    --text-sub: rgba(255, 255, 255, 0.76);
+    --text-muted: rgba(255, 255, 255, 0.52);
+    --surface-soft: rgba(255, 255, 255, 0.16);
+    --surface-border: rgba(255, 255, 255, 0.15);
+    --danger: #ff5f57;
+    --warning: #ffbd2e;
+  }
+  * {
     box-sizing: border-box;
-  }}
-  html, body {{
-    height: 100%;
     margin: 0;
-    overflow: hidden;
-    font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-    color: var(--color-text-primary);
-    background: #ffffff;
-  }}
-  body {{
-    display: flex;
-    align-items: center;
-    justify-content: center;
     padding: 0;
-    position: relative;
-    isolation: isolate;
-    background: url(data:image/png;base64,{light_bg}) center/cover no-repeat;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    body {{
-      background-image: url(data:image/png;base64,{dark_bg});
-    }}
-  }}
-
-
-  .wrap {{
+    user-select: none;
+  }
+  html,
+  body {
     width: 100%;
     height: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding-top: 0;
+    overflow: hidden;
+    background: #111827;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+    color: var(--text-main);
+  }
+  button {
+    font: inherit;
+  }
+  .launcher-window {
     position: relative;
-  }}
-  .card {{
-    width: calc(100% - 44px);
-    padding: 1.2rem 1.35rem 1.1rem;
-    position: relative;
-    z-index: 1;
-  }}
-  .card-header {{
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: 0;
+    background: url(data:image/png;base64,$LIGHT_BG) center/cover no-repeat;
+    box-shadow: none;
     display: flex;
-    align-items: center;
+    flex-direction: column;
     justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 16px;
-  }}
-  .brand-text {{
-    min-width: 0;
-  }}
-  .brand-text strong {{
-    display: inline-flex;
-    align-items: baseline;
-    gap: 7px;
-    font-size: 15px;
-    font-weight: 500;
-    color: var(--color-text-primary);
-    margin-bottom: 2px;
-  }}
-  .launcher-version {{
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    font-variant-numeric: tabular-nums;
-  }}
-  .brand-text span {{
-    font-size: 12px;
-    color: var(--color-text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }}
-  .badge {{
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 4px 10px;
-    border-radius: 99px;
-    background: #e6f1fb;
-    color: #0c447c;
-    border: 0.5px solid #b5d4f4;
-    flex-shrink: 0;
-  }}
-  .badge-err {{
-    background: #fcebeb;
-    color: #791f1f;
-    border-color: #f7c1c1;
-  }}
-  .divider {{
-    height: 0.5px;
-    background: var(--color-border-tertiary);
-    margin-bottom: 16px;
-  }}
-  .status-row {{
-    display: flex;
-    align-items: flex-start;
-    gap: 14px;
-  }}
-  .spinner {{
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 2px solid #b5d4f4;
-    border-top-color: #185fa5;
-    animation: spin 0.9s linear infinite;
-    flex-shrink: 0;
-    margin-top: 3px;
-  }}
-  .err-dot {{
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: #e24b4a;
-    flex-shrink: 0;
-    margin-top: 3px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-size: 10px;
-    font-weight: 500;
-  }}
-  .status-body {{
-    min-width: 0;
-    width: 100%;
-  }}
-  .status-body h2 {{
-    font-size: 21px;
-    font-weight: 500;
-    margin: 0 0 5px;
-    color: var(--color-text-primary);
-    letter-spacing: -0.02em;
-  }}
-  .status-body p {{
-    font-size: 12.5px;
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.45;
-    white-space: pre-line;
-  }}
-  .prog-wrap {{
-    margin-top: 16px;
-  }}
-  .prog-track {{
-    height: 6px;
-    border-radius: 99px;
-    background: var(--color-background-secondary);
-    overflow: hidden;
-  }}
-  .prog-fill {{
-    height: 100%;
-    border-radius: inherit;
-    background: #185fa5;
-    position: relative;
-    overflow: hidden;
-  }}
-  .prog-fill::after {{
+  }
+  @media (prefers-color-scheme: dark) {
+    .launcher-window {
+      background-image: url(data:image/png;base64,$DARK_BG);
+    }
+  }
+  .launcher-window::before {
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
-    transform: translateX(-100%);
-    animation: sweep 2s ease-in-out infinite;
-  }}
-  .prog-fill-err {{
-    background: #e24b4a;
-  }}
-  .prog-fill-err::after {{
-    display: none;
-  }}
-  .prog-meta {{
+    z-index: 0;
+    background:
+      linear-gradient(to bottom, rgba(0, 0, 0, 0.16) 0%, rgba(0, 0, 0, 0.08) 42%, rgba(0, 0, 0, 0.58) 100%),
+      linear-gradient(115deg, rgba(12, 30, 72, 0.22), rgba(255, 126, 117, 0.12));
+    pointer-events: none;
+  }
+  body.error-state .launcher-window::before {
+    background:
+      linear-gradient(to bottom, rgba(56, 0, 10, 0.28) 0%, rgba(78, 0, 13, 0.18) 42%, rgba(60, 0, 12, 0.68) 100%),
+      linear-gradient(115deg, rgba(255, 95, 87, 0.34), rgba(255, 189, 46, 0.08));
+  }
+  .top-bar {
+    position: relative;
+    z-index: 2;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 7px;
-    font-size: 11.5px;
-    color: var(--color-text-secondary);
-  }}
-  .prog-meta-main {{
-    min-width: 0;
-  }}
-  .splash-actions {{
-    display: none;
-    margin-top: 10px;
-  }}
-  .splash-actions-err {{
+    min-height: 60px;
+    padding: 18px 24px;
+  }
+  .brand-zone {
     display: flex;
-    justify-content: flex-start;
     align-items: center;
-  }}
-  .prog-pct {{
+    min-width: 0;
+    gap: 10px;
+  }
+  .app-title {
+    color: var(--text-main);
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+  }
+  .app-version {
+    color: var(--text-sub);
+    font-size: 12px;
+    line-height: 1;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    padding: 4px 9px;
+    border-radius: 999px;
+    backdrop-filter: blur(8px);
+  }
+  .top-right {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    min-width: 0;
+  }
+  .status-badge {
+    max-width: 260px;
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border-radius: 999px;
+    padding: 6px 14px;
+    color: var(--text-main);
+    background: var(--surface-soft);
+    border: 1px solid var(--surface-border);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+    font-size: 12px;
     font-weight: 500;
-    color: #185fa5;
-    font-variant-numeric: tabular-nums;
-  }}
-  .prog-pct-err {{
-    color: #a32d2d;
-  }}
-  .splash-log-button {{
-    min-height: 26px;
-    border: 1px solid #b5d4f4;
-    border-radius: 6px;
-    padding: 0 10px;
-    font: inherit;
-    font-size: 11.5px;
-    color: #185fa5;
-    background: #f7fbff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: pulse 2.2s ease-in-out infinite;
+  }
+  .status-badge::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--secondary-color);
+    box-shadow: 0 0 12px rgba(0, 242, 254, 0.7);
+    flex: 0 0 auto;
+  }
+  .window-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .win-btn {
+    width: 13px;
+    height: 13px;
+    border: 0;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
-  }}
-  .splash-log-button:hover {{
-    background: #eaf4ff;
-  }}
-  .splash-log-button:disabled {{
+    padding: 0;
+    transition: filter 140ms ease, transform 140ms ease;
+  }
+  .win-btn:hover {
+    filter: brightness(1.07);
+    transform: scale(1.04);
+  }
+  .win-btn:active {
+    filter: brightness(0.9);
+    transform: scale(0.97);
+  }
+  .win-btn svg {
+    width: 7px;
+    height: 7px;
+    stroke: rgba(50, 42, 35, 0.72);
+    stroke-width: 1.45;
+    stroke-linecap: round;
+    opacity: 0;
+    transition: opacity 140ms ease;
+  }
+  .window-controls:hover .win-btn svg {
+    opacity: 1;
+  }
+  .win-btn.minimize {
+    background: var(--warning);
+    box-shadow: 0 0 0 0.5px rgba(156, 110, 6, 0.55);
+  }
+  .win-btn.close {
+    background: var(--danger);
+    box-shadow: 0 0 0 0.5px rgba(160, 32, 28, 0.55);
+  }
+  .main-content {
+    position: relative;
+    z-index: 2;
+    padding: 0 40px 35px;
+  }
+  .update-status {
+    margin-bottom: 25px;
+    max-width: min(650px, 100%);
+  }
+  .title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .spinner {
+    width: 22px;
+    height: 22px;
+    border: 2.5px solid rgba(255, 255, 255, 0.24);
+    border-top-color: var(--text-main);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    flex: 0 0 auto;
+  }
+  .err-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #ffffff;
+    color: #c73532;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 800;
+    box-shadow: 0 5px 16px rgba(0, 0, 0, 0.2);
+    flex: 0 0 auto;
+  }
+  .main-action-text {
+    min-width: 0;
+    color: var(--text-main);
+    font-size: 24px;
+    line-height: 1.2;
+    font-weight: 650;
+    letter-spacing: 0;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.32);
+  }
+  .sub-action-text {
+    color: var(--text-sub);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 1.2px;
+    line-height: 1.45;
+    margin: 0;
+    max-width: min(650px, 100%);
+    max-height: 54px;
+    overflow: hidden;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
+    text-transform: uppercase;
+    white-space: pre-line;
+  }
+  .progress-container {
+    position: relative;
+    margin-bottom: 15px;
+  }
+  .progress-bar-bg {
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.22);
+    overflow: hidden;
+    backdrop-filter: blur(5px);
+  }
+  .progress-bar-fill {
+    width: 4%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+    box-shadow: 0 0 14px rgba(0, 242, 254, 0.5);
+    position: relative;
+    overflow: hidden;
+    transition: width 0.35s ease, background 0.2s ease;
+  }
+  .progress-bar-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.48), transparent);
+    transform: translateX(-100%);
+    animation: sweep 2s ease-in-out infinite;
+  }
+  .progress-bar-fill-error {
+    background: linear-gradient(90deg, #ff5f57, #ffbd2e);
+    box-shadow: 0 0 14px rgba(255, 95, 87, 0.46);
+  }
+  .progress-bar-fill-error::after {
+    display: none;
+  }
+  .progress-percentage {
+    position: absolute;
+    right: 0;
+    top: -25px;
+    color: var(--text-main);
+    font-size: 14px;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.32);
+  }
+  .footer-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    min-height: 28px;
+    font-size: 12px;
+  }
+  .tip-text {
+    min-width: 0;
+    max-width: 520px;
+    color: var(--text-sub);
+    background: rgba(0, 0, 0, 0.16);
+    border-left: 3px solid var(--primary-color);
+    border-radius: 4px;
+    padding: 5px 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    backdrop-filter: blur(7px);
+  }
+  .footer-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex: 0 0 auto;
+  }
+  .notice-text {
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .splash-actions {
+    display: none;
+  }
+  .splash-actions-err {
+    display: block;
+  }
+  .splash-log-button {
+    min-height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 6px;
+    padding: 0 11px;
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .splash-log-button:hover {
+    background: rgba(255, 255, 255, 0.23);
+  }
+  .splash-log-button:disabled {
     cursor: default;
     opacity: 0.65;
-  }}
-  @media (max-height: 260px) {{
-    .card {{
-      width: calc(100% - 36px);
-      padding: 1rem 1.15rem 0.95rem;
-    }}
-    .card-header {{
-      margin-bottom: 14px;
-    }}
-    .divider {{
-      margin-bottom: 14px;
-    }}
-    .status-body h2 {{
-      font-size: 18px;
-    }}
-    .status-body p {{
-      font-size: 12px;
-      line-height: 1.4;
-    }}
-    .prog-wrap {{
-      margin-top: 14px;
-    }}
-    .prog-meta {{
-      margin-top: 6px;
-      font-size: 11px;
-    }}
-  }}
-  @media (max-width: 560px) {{
-    body {{
-      padding: 0 12px;
-    }}
-    .card-header {{
-      align-items: flex-start;
-    }}
-    .brand-text span {{
-      white-space: normal;
-    }}
-    .prog-meta {{
+  }
+  body.error-state .status-badge {
+    background: rgba(255, 255, 255, 0.18);
+    animation: none;
+  }
+  body.error-state .status-badge::before {
+    background: #ff5f57;
+    box-shadow: 0 0 12px rgba(255, 95, 87, 0.76);
+  }
+  body.error-state .tip-text {
+    border-left-color: #ffbd2e;
+  }
+  @media (max-width: 720px) {
+    .top-bar {
+      padding: 16px 20px;
+    }
+    .status-badge {
+      max-width: 180px;
+    }
+    .main-content {
+      padding: 0 28px 28px;
+    }
+    .main-action-text {
+      font-size: 22px;
+    }
+  }
+  @media (max-width: 560px), (max-height: 340px) {
+    .top-right {
+      gap: 12px;
+    }
+    .status-badge {
+      display: none;
+    }
+    .footer-info {
       flex-direction: column;
       align-items: flex-start;
-      gap: 12px;
-    }}
-  }}
-  @keyframes spin {{
-    to {{ transform: rotate(360deg); }}
-  }}
-  @keyframes sweep {{
-    to {{ transform: translateX(200%); }}
-  }}
+      gap: 8px;
+    }
+    .footer-right {
+      width: 100%;
+      justify-content: space-between;
+    }
+    .tip-text {
+      max-width: 100%;
+    }
+  }
+  @media (max-height: 340px) {
+    .main-content {
+      padding-bottom: 24px;
+    }
+    .update-status {
+      margin-bottom: 18px;
+    }
+    .sub-action-text {
+      max-height: 36px;
+    }
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.9; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.015); box-shadow: 0 0 18px rgba(255, 255, 255, 0.18); }
+  }
+  @keyframes sweep {
+    to { transform: translateX(200%); }
+  }
 </style>
 </head>
 <body>
-  {splash_titlebar}
-  <div class="wrap">
-    <div class="card">
-      <div class="card-header">
-        <div class="brand-text">
-          <strong>AzurPilot <span class="launcher-version">v{launcher_version}</span></strong>
-          <span id="subtitle">正在初始化...</span>
-        </div>
-        <div id="badge" class="badge">正在加载</div>
+  <div class="launcher-window">
+    <div id="splash-drag-region" class="top-bar">
+      <div class="brand-zone">
+        <span class="app-title">AzurPilot</span>
+        <span class="app-version">v$LAUNCHER_VERSION</span>
       </div>
-      <div class="divider"></div>
-      <div class="status-row">
-        <div id="spinner" class="spinner"></div>
-        <div id="error-dot" class="err-dot" style="display:none;">!</div>
-        <div class="status-body">
-          <h2 id="title">正在启动</h2>
-          <p id="detail">本地 Web 界面正在初始化，准备就绪后将自动打开窗口。</p>
+      <div class="top-right">
+        <div id="badge" class="status-badge">
+          <span id="badge-text">正在初始化...</span>
+        </div>
+        <div class="window-controls">
+          <button id="window-minimize" class="win-btn minimize" type="button" aria-label="最小化" title="最小化">
+            <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="4" x2="6" y2="4"></line></svg>
+          </button>
+          <button id="window-close" class="win-btn close" type="button" aria-label="关闭" title="关闭">
+            <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="2" x2="6" y2="6"></line><line x1="6" y1="2" x2="2" y2="6"></line></svg>
+          </button>
         </div>
       </div>
-      <div class="prog-wrap">
-        <div class="prog-track">
-          <div id="progress-fill" class="prog-fill" style="width: 4%;"></div>
+    </div>
+
+    <div class="main-content">
+      <div class="update-status">
+        <div class="title-group">
+          <div id="spinner" class="spinner"></div>
+          <div id="error-dot" class="err-dot" style="display:none;">!</div>
+          <h1 id="title" class="main-action-text">正在启动</h1>
         </div>
-        <div class="prog-meta">
-          <span id="progress-meta" class="prog-meta-main">准备就绪后将自动打开窗口</span>
-          <span id="progress-pct" class="prog-pct">4%</span>
+        <p id="detail" class="sub-action-text">本地 Web 界面正在初始化，准备就绪后将自动打开窗口。</p>
+      </div>
+
+      <div class="progress-container">
+        <div id="progress-pct" class="progress-percentage">4%</div>
+        <div class="progress-bar-bg">
+          <div id="progress-fill" class="progress-bar-fill" style="width: 4%;"></div>
         </div>
-        <div id="splash-actions" class="splash-actions">
-          <button id="splash-log-button" class="splash-log-button" type="button">下载启动器日志</button>
+      </div>
+
+      <div class="footer-info">
+        <div id="tip-text" class="tip-text">Tips: 重樱的樱花落了，但我们的奋斗才刚开始。</div>
+        <div class="footer-right">
+          <div id="progress-meta" class="notice-text">准备就绪后将自动打开窗口</div>
+          <div id="splash-actions" class="splash-actions">
+            <button id="splash-log-button" class="splash-log-button" type="button">下载启动器日志</button>
+          </div>
         </div>
       </div>
     </div>
   </div>
+
   <script>
-    {splash_script}
-    window.__ALAS_SPLASH_UPDATE = function (payload) {{
+    const defaultTip = '重樱的樱花落了，但我们的奋斗才刚开始。';
+    const invoke =
+      (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+      || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+
+    window.addEventListener('contextmenu', event => {
+      event.preventDefault();
+    }, { capture: true });
+
+    function splitSubtitle(value) {
+      const text = String(value || '').trim();
+      if (!text) {
+        return { status: '正在加载', tip: defaultTip };
+      }
+      const match = text.match(/^(.*?)\s*\|\s*Tips[:：]\s*(.*)$/);
+      if (!match) {
+        return { status: text, tip: defaultTip };
+      }
+      return {
+        status: match[1].trim() || '正在加载',
+        tip: match[2].trim() || defaultTip,
+      };
+    }
+
+    function normalizeDetail(value) {
+      const text = String(value || '').trim();
+      return text || '本地 Web 界面正在初始化，准备就绪后将自动打开窗口。';
+    }
+
+    window.__ALAS_SPLASH_UPDATE = function (payload) {
       const badge = document.getElementById('badge');
+      const badgeText = document.getElementById('badge-text');
       const spinner = document.getElementById('spinner');
       const errorDot = document.getElementById('error-dot');
       const progressFill = document.getElementById('progress-fill');
       const progressPct = document.getElementById('progress-pct');
       const progressMeta = document.getElementById('progress-meta');
       const splashActions = document.getElementById('splash-actions');
+      const subtitle = splitSubtitle(payload.subtitle);
 
-      document.getElementById('subtitle').textContent = payload.subtitle || '';
-      document.getElementById('title').textContent = payload.title || '';
-      document.getElementById('detail').textContent = payload.detail || '';
+      badgeText.textContent = payload.is_error ? '启动失败' : subtitle.status;
+      document.getElementById('tip-text').textContent = 'Tips: ' + subtitle.tip;
+      document.getElementById('title').textContent = payload.title || '正在启动';
+      document.getElementById('detail').textContent = normalizeDetail(payload.detail);
       progressMeta.textContent = payload.is_error
         ? '初始化已停止'
         : '准备就绪后将自动打开窗口';
@@ -1996,58 +2176,77 @@ fn splash_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
       progressFill.style.width = progress + '%';
       progressPct.textContent = progress + '%';
 
-      if (payload.is_error) {{
+      if (payload.is_error) {
         document.body.classList.add('error-state');
-        badge.textContent = 'ERROR';
-        badge.className = 'badge badge-err';
+        badge.className = 'status-badge status-badge-err';
         spinner.style.display = 'none';
         errorDot.style.display = 'flex';
-        progressFill.className = 'prog-fill prog-fill-err';
-        progressPct.className = 'prog-pct prog-pct-err';
+        progressFill.className = 'progress-bar-fill progress-bar-fill-error';
         splashActions.className = 'splash-actions splash-actions-err';
-      }} else {{
+      } else {
         document.body.classList.remove('error-state');
-        badge.textContent = '正在加载';
-        badge.className = 'badge';
+        badge.className = 'status-badge';
         spinner.style.display = 'block';
         errorDot.style.display = 'none';
-        progressFill.className = 'prog-fill';
-        progressPct.className = 'prog-pct';
+        progressFill.className = 'progress-bar-fill';
         splashActions.className = 'splash-actions';
-      }}
-    }};
+      }
+    };
 
-    document.getElementById('splash-log-button').addEventListener('click', async () => {{
+    document.getElementById('splash-drag-region').addEventListener('mousedown', event => {
+      if (event.button !== 0 || event.target.closest('button')) {
+        return;
+      }
+      if (typeof invoke === 'function') {
+        invoke('window_start_dragging').catch(error => {
+          console.error('Failed to drag splash window', error);
+        });
+      }
+    });
+
+    document.getElementById('window-minimize').addEventListener('click', event => {
+      event.stopPropagation();
+      if (typeof invoke === 'function') {
+        invoke('window_minimize').catch(error => {
+          console.error('Failed to minimize splash window', error);
+        });
+      }
+    });
+
+    document.getElementById('window-close').addEventListener('click', event => {
+      event.stopPropagation();
+      if (typeof invoke === 'function') {
+        invoke('window_close').catch(error => {
+          console.error('Failed to close splash window', error);
+        });
+      }
+    });
+
+    document.getElementById('splash-log-button').addEventListener('click', async () => {
       const button = document.getElementById('splash-log-button');
       const progressMeta = document.getElementById('progress-meta');
       button.disabled = true;
       progressMeta.textContent = '正在准备启动器日志...';
-      try {{
-        const invoke =
-          (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
-          || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
-        if (typeof invoke !== 'function') {{
+      try {
+        if (typeof invoke !== 'function') {
           throw new Error('Tauri invoke is unavailable');
-        }}
+        }
         const filename = await invoke('download_today_launcher_log');
         progressMeta.textContent = '已打开保存窗口：' + filename;
-      }} catch (error) {{
+      } catch (error) {
         progressMeta.textContent = '启动器日志下载失败：' + (error && error.message ? error.message : error);
-      }} finally {{
+      } finally {
         button.disabled = false;
-      }}
-    }});
+      }
+    });
+
+    window.__ALAS_SPLASH_READY = true;
   </script>
 </body>
-</html>"#,
-        light_bg = light_bg_b64,
-        dark_bg = dark_bg_b64,
-        splash_script = splash_script,
-        splash_titlebar = splash_titlebar,
-        launcher_version = env!("CARGO_PKG_VERSION"),
-    );
-
-    html
+</html>"#
+    .replace("$LIGHT_BG", light_bg_b64)
+    .replace("$DARK_BG", dark_bg_b64)
+    .replace("$LAUNCHER_VERSION", env!("CARGO_PKG_VERSION"))
 }
 
 fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow> {
@@ -2066,8 +2265,8 @@ fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow
         .build()?;
     main_window.set_resizable(true)?;
 
-    // Windows/Linux: remove native decorations for main window only.
-    // Splash window keeps native decorations (title bar).
+    // Windows/Linux: remove native decorations for the main window as well.
+    // Splash is configured as borderless in tauri.conf.json.
     #[cfg(not(target_os = "macos"))]
     {
         main_window.set_decorations(false)?;

@@ -312,6 +312,7 @@ fn setup_git_ca_bundle() {
 pub fn setup_alas_repo(
     mut status_updater: impl FnMut(SplashUpdate),
     cancel_requested: Arc<AtomicBool>,
+    skip_repository_update: bool,
 ) -> Result<()> {
     info!("Starting setup for AzurPilot repository...");
     #[cfg(target_os = "linux")]
@@ -325,11 +326,23 @@ pub fn setup_alas_repo(
     ensure_runtime_tools(&bootstrap_uv, &cancel_requested, &mut status_updater)?;
     atomic_failure_cleanup("./config", &cancel_requested)?;
     migrate_dependency_config()?;
-    status_updater(
-        SplashUpdate::loading("正在更新", "正在获取最新补丁包", 18)
-            .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
-    );
-    git_update(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
+    if skip_repository_update {
+        info!("Skipping AzurPilot repository update because preview no-update mode is enabled");
+        status_updater(
+            SplashUpdate::loading(
+                "跳过更新",
+                "已通过启动参数跳过仓库更新，正在使用本地文件继续启动。",
+                18,
+            )
+            .with_subtitle(format!("预览模式中... | Tips：{}", get_tip())),
+        );
+    } else {
+        status_updater(
+            SplashUpdate::loading("正在更新", "正在获取最新补丁包", 18)
+                .with_subtitle(format!("同步中... | Tips：{}", get_tip())),
+        );
+        git_update(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
+    }
     status_updater(
         SplashUpdate::loading(
             "安装依赖库",

@@ -20,12 +20,13 @@
       {
         "label": "splash",
         "title": "AzurPilot",
-        "width": 620,
-        "height": 280,
+        "width": 800,
+        "height": 450,
         "resizable": false,
+        "decorations": false,
         "url": "about:blank",
         "acceptFirstMouse": true,
-        "visible": true,
+        "visible": false,
         "create": true
       }
     ]
