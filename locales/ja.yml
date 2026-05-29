@@ -75,6 +75,8 @@ launcher_update:
   restart_title: "ランチャーを再起動中"
   restarting_detail: "更新の準備が完了しました。まもなくランチャーを再起動します。"
   restart_status: "再起動を準備中..."
+  failed: "ランチャーの更新に失敗しました"
+  failed_detail: "ランチャーの更新が完了するまで、実行環境の修復は行いません。\n\n%{error}"
 
 dialog:
   cleaning_env: "環境をクリーンアップ中"

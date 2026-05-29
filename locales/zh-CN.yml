@@ -75,6 +75,8 @@ launcher_update:
   restart_title: "正在重启启动器"
   restarting_detail: "更新已准备好，启动器即将重启。"
   restart_status: "准备重启..."
+  failed: "启动器更新失败"
+  failed_detail: "启动器必须先完成更新，暂不修复运行环境。\n\n%{error}"
 
 dialog:
   cleaning_env: "正在清理环境"

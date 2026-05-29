@@ -338,6 +338,7 @@ fn launcher_update_browser_headers() -> HeaderMap {
 fn launcher_update_http_client(timeout: Option<Duration>) -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(15))
+        .no_proxy()
         .default_headers(launcher_update_browser_headers());
     builder = match timeout {
         Some(timeout) => builder.timeout(timeout),
@@ -354,13 +355,33 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
     }
 
     let platform_key = launcher_update_platform_key();
-    let manifest_client = launcher_update_http_client(Some(Duration::from_secs(10)))?;
-    let manifest_text = manifest_client
-        .get(LAUNCHER_UPDATE_URL)
-        .send()?
-        .error_for_status()?
-        .text()?;
-    let manifest: LauncherUpdateManifest = serde_json::from_str(&manifest_text)?;
+    let manifest_client = match launcher_update_http_client(Some(Duration::from_secs(10))) {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("Unable to create launcher update client: {err:#}");
+            return Ok(false);
+        }
+    };
+    let manifest_text = match (|| -> Result<String> {
+        Ok(manifest_client
+            .get(LAUNCHER_UPDATE_URL)
+            .send()?
+            .error_for_status()?
+            .text()?)
+    })() {
+        Ok(text) => text,
+        Err(err) => {
+            warn!("Unable to fetch launcher update manifest: {err:#}");
+            return Ok(false);
+        }
+    };
+    let manifest: LauncherUpdateManifest = match serde_json::from_str(&manifest_text) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            warn!("Unable to parse launcher update manifest: {err:#}");
+            return Ok(false);
+        }
+    };
     let current_version = env!("CARGO_PKG_VERSION");
     if !launcher_version_is_newer(current_version, &manifest.version) {
         info!(
@@ -1121,17 +1142,23 @@ fn replace_launcher_and_restart(current_exe: &Path, update_path: &Path) -> Resul
     let script = format!(
         "@echo off\r\n\
          setlocal\r\n\
-         timeout /t 1 /nobreak >nul\r\n\
-         move /y \"{}\" \"{}\" >nul\r\n\
+         set \"UPDATE_PATH={}\"\r\n\
+         set \"TARGET_PATH={}\"\r\n\
+         for /l %%i in (1,1,60) do (\r\n\
+         \tmove /y \"%UPDATE_PATH%\" \"%TARGET_PATH%\" >nul 2>nul\r\n\
+         \tif not errorlevel 1 goto restart\r\n\
+         \ttimeout /t 1 /nobreak >nul\r\n\
+         )\r\n\
+         exit /b 1\r\n\
+         :restart\r\n\
          set {}=1\r\n\
          set {}=1\r\n\
-         start \"\" \"{}\"\r\n\
+         start \"\" \"%TARGET_PATH%\"\r\n\
          del \"%~f0\"\r\n",
         update_path.display(),
         current_exe.display(),
         LAUNCHER_UPDATE_SKIP_ENV,
         LAUNCHER_UPDATE_NO_CONSOLE_ENV,
-        current_exe.display()
     );
     fs::write(&script_path, script)?;
     use std::os::windows::process::CommandExt;
@@ -1468,7 +1495,20 @@ fn main() -> Result<()> {
                                     return;
                                 }
                                 Ok(false) => {}
-                                Err(e) => warn!("Launcher update check failed: {e:#}"),
+                                Err(e) => {
+                                    warn!("Required launcher update failed: {e:#}");
+                                    launcher_status_updater(SplashUpdate::error(
+                                        t!("launcher_update.failed"),
+                                        t!(
+                                            "launcher_update.failed_detail",
+                                            error = format!("{e:#}")
+                                        ),
+                                        launcher_progress.get().max(8),
+                                    ));
+                                    setup_completed.store(true, Ordering::SeqCst);
+                                    setup_running.store(false, Ordering::SeqCst);
+                                    return;
+                                }
                             }
                         }
 

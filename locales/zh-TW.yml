@@ -75,6 +75,8 @@ launcher_update:
   restart_title: "正在重新啟動啟動器"
   restarting_detail: "更新已準備好，啟動器即將重新啟動。"
   restart_status: "準備重新啟動..."
+  failed: "啟動器更新失敗"
+  failed_detail: "啟動器必須先完成更新，暫不修復執行環境。\n\n%{error}"
 
 dialog:
   cleaning_env: "正在清理環境"

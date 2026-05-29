@@ -75,6 +75,8 @@ launcher_update:
   restart_title: "Restarting launcher"
   restarting_detail: "Update is ready. The launcher will restart shortly."
   restart_status: "Preparing restart..."
+  failed: "Launcher update failed"
+  failed_detail: "The launcher must finish updating before repairing the runtime environment.\n\n%{error}"
 
 dialog:
   cleaning_env: "Cleaning environment"
