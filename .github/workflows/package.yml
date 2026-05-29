@@ -373,7 +373,7 @@ jobs:
               if key.endswith(".exe"):
                   key = key[:-4]
               url_name = name
-              if name.startswith("alas-launcher-windows-") and name.endswith(".exe"):
+              if name == "alas-launcher-windows-x86_64.exe":
                   url_name = "alas-launcher.exe"
               digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
               platforms[key] = {
@@ -411,19 +411,33 @@ jobs:
           set -eu
           REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
           INCOMING="${DEPLOY_PATH}/.incoming-${GITHUB_RUN_ID}"
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}' '${INCOMING}'"
+          UPLOAD_DIR="launcher-updater-upload"
+          rm -rf "${UPLOAD_DIR}"
+          mkdir -p "${UPLOAD_DIR}"
           for file in launcher-updater/alas-launcher-*; do
             [ -f "${file}" ] || continue
             filename="$(basename "${file}")"
             remote_name="${filename}"
-            if [[ "${filename}" == alas-launcher-windows-*.exe ]]; then
+            if [[ "${filename}" == "alas-launcher-windows-x86_64.exe" ]]; then
               remote_name="alas-launcher.exe"
             fi
-            scp -P "${DEPLOY_PORT}" "${file}" "${REMOTE}:${INCOMING}/${remote_name}"
+            cp "${file}" "${UPLOAD_DIR}/${remote_name}"
           done
-          scp -P "${DEPLOY_PORT}" launcher-updater/stable.json "${REMOTE}:${INCOMING}/stable.json"
+          cp launcher-updater/stable.json "${UPLOAD_DIR}/stable.json"
+          ARCHIVE="launcher-updater-upload.tar.gz"
+          PARTS_DIR="launcher-updater-upload-parts"
+          rm -rf "${ARCHIVE}" "${PARTS_DIR}"
+          tar -C "${UPLOAD_DIR}" -cf - . | gzip -1 > "${ARCHIVE}"
+          mkdir -p "${PARTS_DIR}"
+          split -b 4m -d -a 4 "${ARCHIVE}" "${PARTS_DIR}/part-"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "rm -rf '${INCOMING}' && mkdir -p '${DEPLOY_PATH}' '${INCOMING}/parts' '${INCOMING}/unpack'"
+          find "${PARTS_DIR}" -type f -name 'part-*' -print0 \
+            | xargs -0 -P 8 -I {} sh -c 'part="$1"; scp -q -P "$2" "$part" "$3:$4/parts/$(basename "$part")"' sh "{}" "${DEPLOY_PORT}" "${REMOTE}" "${INCOMING}"
           ssh -p "${DEPLOY_PORT}" "${REMOTE}" "set -eu
-            find '${INCOMING}' -maxdepth 1 -type f ! -name 'stable.json' -exec mv -f {} '${DEPLOY_PATH}/' \;
-            mv -f '${INCOMING}/stable.json' '${DEPLOY_PATH}/stable.json'
+            cat '${INCOMING}/parts'/part-* | gzip -d | tar -C '${INCOMING}/unpack' -xf -
+          "
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "set -eu
+            find '${INCOMING}/unpack' -maxdepth 1 -type f ! -name 'stable.json' -exec mv -f {} '${DEPLOY_PATH}/' \;
+            mv -f '${INCOMING}/unpack/stable.json' '${DEPLOY_PATH}/stable.json'
             rm -rf '${INCOMING}'
           "
