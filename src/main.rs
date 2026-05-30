@@ -91,7 +91,7 @@ const MINI_LAUNCHER_VERSION: &str = "0.0.1";
 const LAUNCHER_UPDATE_MIN_PARALLEL_BYTES: u64 = 4 * 1024 * 1024;
 const LAUNCHER_UPDATE_MAX_CHUNK_BYTES: u64 = 500 * 1024;
 const LAUNCHER_UPDATE_MIN_CHUNK_BYTES: u64 = 64 * 1024;
-const LAUNCHER_UPDATE_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+const LAUNCHER_UPDATE_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 AZURPILOT_LAUNCHER_UPDATE/2.0.4";
 #[cfg(windows)]
 const LAUNCHER_UPDATE_NO_CONSOLE_ENV: &str = "AZURPILOT_NO_ATTACH_CONSOLE";
 #[cfg(windows)]
