@@ -453,12 +453,18 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
 
     let current_exe = std::env::current_exe()?;
     let update_path = launcher_update_temp_path(&current_exe);
-    download_launcher_update(
+    if let Err(err) = download_launcher_update(
         &platform.url,
         &update_path,
         &platform.sha256,
         &mut status_updater,
-    )?;
+    ) {
+        warn!("Launcher update download failed: {err:#}");
+        if mini_launcher {
+            return Err(err);
+        }
+        return Ok(false);
+    }
     make_executable(&update_path)?;
     status_updater(
         SplashUpdate::loading(
@@ -468,7 +474,13 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
         )
         .with_subtitle(t!("launcher_update.restart_status")),
     );
-    replace_launcher_and_restart(&current_exe, &update_path)?;
+    if let Err(err) = replace_launcher_and_restart(&current_exe, &update_path) {
+        warn!("Launcher update replacement failed: {err:#}");
+        if mini_launcher {
+            return Err(err);
+        }
+        return Ok(false);
+    }
     Ok(true)
 }
 
