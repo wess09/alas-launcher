@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - '*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build when not running from a tag. Leave empty to use Cargo.toml.
+        required: false
+        type: string
 
 env:
   UV_MANAGED_PYTHON: 1
@@ -36,6 +41,86 @@ jobs:
         uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+      - name: Prepare version from tag or input
+        shell: python
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version || '' }}
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          cargo_path = Path("Cargo.toml")
+          tauri_path = Path("tauri.conf.json")
+          info_plist_path = Path("Info.plist")
+          cargo_lock_path = Path("Cargo.lock")
+
+          cargo_text = cargo_path.read_text(encoding="utf-8")
+          current_version_match = re.search(r'(?m)^version = "([^"]+)"', cargo_text)
+          if not current_version_match:
+              raise SystemExit("Unable to read current version from Cargo.toml")
+          current_version = current_version_match.group(1)
+
+          ref_type = os.environ.get("REF_TYPE", "")
+          ref_name = os.environ.get("REF_NAME", "").strip()
+          input_version = os.environ.get("INPUT_VERSION", "").strip()
+          version = ref_name if ref_type == "tag" else input_version or current_version
+
+          semver_pattern = re.compile(
+              r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+          )
+          if not semver_pattern.fullmatch(version):
+              raise SystemExit(
+                  f"Version '{version}' is not valid SemVer for Cargo/Tauri. "
+                  "Use a tag such as '2.0.6' instead of 'v2.0.6'."
+              )
+
+          def replace_once(path: Path, pattern: str, replacement: str) -> None:
+              text = path.read_text(encoding="utf-8")
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f"Unable to update version in {path}")
+              path.write_text(updated, encoding="utf-8")
+
+          replace_once(cargo_path, r'(?m)^version = "[^"]+"', f'version = "{version}"')
+
+          import json
+
+          tauri = json.loads(tauri_path.read_text(encoding="utf-8"))
+          tauri["version"] = version
+          tauri_path.write_text(json.dumps(tauri, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+          for key_name in ("CFBundleShortVersionString", "CFBundleVersion"):
+              info_text = info_plist_path.read_text(encoding="utf-8")
+              info_text, count = re.subn(
+                  rf"(<key>{re.escape(key_name)}</key>\s*<string>)[^<]+(</string>)",
+                  rf"\g<1>{version}\2",
+                  info_text,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(f"Info.plist is missing {key_name}")
+              info_plist_path.write_text(info_text, encoding="utf-8")
+
+          lock_text = cargo_lock_path.read_text(encoding="utf-8")
+          lock_updated, count = re.subn(
+              r'(?ms)(\[\[package\]\]\s+name = "alas-launcher"\s+version = ")[^"]+(")',
+              rf"\g<1>{version}\2",
+              lock_text,
+              count=1,
+          )
+          if count == 1:
+              cargo_lock_path.write_text(lock_updated, encoding="utf-8")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"PACKAGE_VERSION={version}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          print(f"Building version {version}")
       - name: Prepare bootstrap uv
         uses: knicknic/os-specific-run@v1.0.3
         with:
@@ -169,14 +254,14 @@ jobs:
             rdfind -minsize 128 -makehardlinks true AzurPilot.app
             uv run python - <<EOF
             import tarfile, lzma
-            with tarfile.open('AzurLaneAutoScript-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
+            with tarfile.open('AP-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('AzurPilot.app')
             EOF
 
             cp deploy.mac-cn.yaml AzurPilot.app/Contents/AzurLaneAutoScript/config/deploy.yaml
             uv run python - <<EOF
             import tarfile, lzma
-            with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
+            with tarfile.open('AP-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('AzurPilot.app')
             EOF
           linux: |
@@ -218,14 +303,14 @@ jobs:
             rdfind -minsize 128 -makehardlinks true package-root/AzurLaneAutoScript
             uv run python - <<EOF
             import tarfile, lzma
-            with tarfile.open('AzurLaneAutoScript-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
+            with tarfile.open('AP-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             EOF
 
             cp deploy.unix-cn.yaml package-root/AzurLaneAutoScript/config/deploy.yaml
             uv run python - <<EOF
             import tarfile, lzma
-            with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
+            with tarfile.open('AP-CN-${{ runner.os }}-$(uname -m).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             EOF
           windows: |
@@ -273,6 +358,31 @@ jobs:
             with tarfile.open('AzurLaneAutoScript-CN-${{ runner.os }}-$($env:PROCESSOR_ARCHITECTURE.ToLower()).tar.xz', 'x:xz', preset=9|lzma.PRESET_EXTREME) as t:
               t.add('package-root/AzurLaneAutoScript', arcname='AzurLaneAutoScript')
             "@
+      - name: Install Inno Setup (Windows x64 only)
+        if: matrix.os == 'windows-latest'
+        run: choco install innosetup --no-progress -y
+      - name: Build Windows installer (Windows x64 only)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+            )
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) {
+            throw "ISCC.exe was not found after installing Inno Setup"
+          }
+          & $iscc install.iss `
+            "/DAppVersion=$env:PACKAGE_VERSION" `
+            "/DOutputBaseFilename=AzurPilot_Setup_$env:PACKAGE_VERSION" `
+            "/DPackageRoot=package-root\AzurLaneAutoScript" `
+            "/DSetupRoot=setup"
       - name: Prepare launcher updater payload
         uses: knicknic/os-specific-run@v1.0.3
         with:
@@ -311,15 +421,18 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AzurLaneAutoScript-${{ matrix.os }}
+          name: package-${{ matrix.os }}
           path: |
             AzurLaneAutoScript-${{ runner.os }}-*
+            AP-${{ runner.os }}-*
+            AzurPilot_Setup_*.exe
       - name: Upload artifacts (CN)
         uses: actions/upload-artifact@v4
         with:
-          name: AzurLaneAutoScript-CN-${{ matrix.os }}
+          name: package-CN-${{ matrix.os }}
           path: |
             AzurLaneAutoScript-CN-${{ runner.os }}-*
+            AP-CN-${{ runner.os }}-*
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
@@ -328,6 +441,9 @@ jobs:
           files: |
             AzurLaneAutoScript-${{ runner.os }}-*
             AzurLaneAutoScript-CN-${{ runner.os }}-*
+            AP-${{ runner.os }}-*
+            AP-CN-${{ runner.os }}-*
+            AzurPilot_Setup_*.exe
 
   deploy-launcher-update:
     if: github.ref_type == 'tag'
