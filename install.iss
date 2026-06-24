@@ -19,6 +19,10 @@
   #define SetupRoot "setup"
 #endif
 
+#ifndef ChineseMessagesFile
+  #define ChineseMessagesFile "ChineseSimplified.isl"
+#endif
+
 [Setup]
 AppName=AzurPilot
 AppVersion={#AppVersion}
@@ -45,7 +49,7 @@ PrivilegesRequired=admin
 UninstallDisplayIcon={app}\alas-launcher.exe
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
