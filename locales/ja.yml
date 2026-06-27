@@ -143,6 +143,11 @@ notify:
   default_body: "新しい通知があります"
   open: "開く"
 
+autostart:
+  unsupported: "このプラットフォームでは自動起動に対応していません"
+  query_failed: "自動起動状態の確認に失敗しました：%{error}"
+  set_failed: "自動起動の設定に失敗しました：%{error}"
+
 errors:
   uv_not_found: "ランチャーに内蔵 uv がなく、システム PATH からも uv が見つかりません"
   write_uv_failed: "内蔵 uv の %{path} への書き込みに失敗しました"

@@ -143,6 +143,11 @@ notify:
   default_body: "您有一則新通知"
   open: "開啟"
 
+autostart:
+  unsupported: "目前平台不支援開機自動啟動"
+  query_failed: "查詢開機自動啟動狀態失敗：%{error}"
+  set_failed: "設定開機自動啟動失敗：%{error}"
+
 errors:
   uv_not_found: "啟動器未內建 uv，且系統 PATH 中找不到 uv"
   write_uv_failed: "寫入內建 uv 到 %{path} 失敗"

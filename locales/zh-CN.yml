@@ -143,6 +143,11 @@ notify:
   default_body: "您有一条新通知"
   open: "打开"
 
+autostart:
+  unsupported: "当前平台不支持开机自启动"
+  query_failed: "查询开机自启动状态失败：%{error}"
+  set_failed: "设置开机自启动失败：%{error}"
+
 errors:
   uv_not_found: "启动器未内置 uv，且系统 PATH 中找不到 uv"
   write_uv_failed: "写入内置 uv 到 %{path} 失败"

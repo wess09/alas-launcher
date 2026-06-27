@@ -1,8 +1,10 @@
 // No default console window createion on Windows
 #![windows_subsystem = "windows"]
 
+mod autostart;
 mod backend;
 mod i18n;
+mod launcher_control;
 mod notify;
 mod setup;
 mod window_util;
@@ -59,6 +61,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     backend::{ManagedBackend, WebuiLaunchConfig},
+    launcher_control::start_launcher_control_stream,
     notify::{start_notify_stream, NotificationClickHandler},
     setup::{
         cleanup_runtime_for_rebuild, get_deploy_config, setup_alas_repo, setup_environment,
@@ -113,6 +116,7 @@ const PREVIEW_CRASH_ARGS: &[&str] = &[
     "/preview-crash",
     "/preview-error",
 ];
+const START_MINIMIZED_ARGS: &[&str] = &["--start-minimized", "/start-minimized"];
 
 #[derive(Clone, Debug)]
 struct TimeBombConfig {
@@ -1129,6 +1133,10 @@ fn preview_crash_arg_present() -> bool {
     launcher_arg_present(PREVIEW_CRASH_ARGS)
 }
 
+fn start_minimized_arg_present() -> bool {
+    launcher_arg_present(START_MINIMIZED_ARGS)
+}
+
 fn launcher_update_temp_path(current_exe: &Path) -> PathBuf {
     let file_name = current_exe
         .file_name()
@@ -1393,6 +1401,7 @@ fn main() -> Result<()> {
     crate::i18n::init();
     let preview_crash = preview_crash_arg_present();
     let preview_no_update = preview_crash || preview_no_update_arg_present();
+    let start_minimized = start_minimized_arg_present();
 
     info!("=== AzurPilot starting ===");
     info!("Launcher log file: log/{}", today_launcher_log_filename());
@@ -1401,6 +1410,9 @@ fn main() -> Result<()> {
     }
     if preview_crash {
         info!("Preview crash mode enabled; splash will stop on an artificial error state");
+    }
+    if start_minimized {
+        info!("Start minimized mode enabled; main window will stay in tray after backend is ready");
     }
 
     let deploy_config = get_deploy_config();
@@ -1427,6 +1439,7 @@ fn main() -> Result<()> {
     let recreating_main_window_for_setup = recreating_main_window.clone();
     let recreating_main_window_for_run = recreating_main_window.clone();
     let launch_blocked_for_run = launch_blocked.clone();
+    let start_minimized_for_run = start_minimized;
     #[cfg(windows)]
     let close_prompt_active_for_run = close_prompt_active.clone();
 
@@ -1604,10 +1617,11 @@ fn main() -> Result<()> {
                     let setup_running = setup_running.clone();
                     let setup_completed = setup_completed.clone();
                     let recreating_main_window_for_notify = recreating_main_window_for_run.clone();
+                    let start_minimized = start_minimized_for_run;
                     thread::spawn(move || {
                         setup_running.store(true, Ordering::SeqCst);
                         let splash = app_handle.get_webview_window("splash").unwrap();
-                        initialize_splash(&splash);
+                        initialize_splash(&splash, !start_minimized);
                         let last_progress = Cell::new(0u8);
                         let mut status_updater = |mut update: SplashUpdate| {
                             update.progress = update.progress.max(last_progress.get());
@@ -1648,6 +1662,9 @@ fn main() -> Result<()> {
                                 Ok(false) => {}
                                 Err(e) => {
                                     warn!("Required launcher update failed: {e:#}");
+                                    if start_minimized {
+                                        let _ = reveal_window(&splash);
+                                    }
                                     launcher_status_updater(SplashUpdate::error(
                                         t!("launcher_update.failed"),
                                         t!(
@@ -1664,6 +1681,9 @@ fn main() -> Result<()> {
                         }
 
                         if preview_crash {
+                            if start_minimized {
+                                let _ = reveal_window(&splash);
+                            }
                             status_updater(
                                 SplashUpdate::error(
                                     t!("dialog.startup_failed"),
@@ -1690,6 +1710,9 @@ fn main() -> Result<()> {
                             if setup_cancel_requested.load(Ordering::SeqCst) {
                                 return;
                             }
+                            if start_minimized {
+                                let _ = reveal_window(&splash);
+                            }
                             status_updater(SplashUpdate::error(
                                 t!("dialog.startup_failed"),
                                 t!("dialog.repo_setup_failed", error = e.to_string()),
@@ -1715,6 +1738,9 @@ fn main() -> Result<()> {
                             Err(e) => {
                                 error!("{e}");
                                 setup_running.store(false, Ordering::SeqCst);
+                                if start_minimized {
+                                    let _ = reveal_window(&splash);
+                                }
                                 status_updater(SplashUpdate::error(
                                     t!("dialog.startup_failed"),
                                     t!("dialog.backend_launch_failed", error = e.to_string()),
@@ -1741,6 +1767,7 @@ fn main() -> Result<()> {
                             allow_exit.clone(),
                             notification_click,
                         );
+                        start_launcher_control_stream(port, allow_exit.clone());
                         status_updater(
                             SplashUpdate::loading(t!("splash.opening"), t!("splash.ready"), 100)
                                 .with_subtitle(format!(
@@ -1758,7 +1785,12 @@ fn main() -> Result<()> {
                         if let Err(e) = navigate_backend_or_error(&window, port) {
                             error!("Failed to navigate main window: {:?}", e);
                         }
-                        reveal_window(&window).unwrap();
+                        if start_minimized {
+                            info!("Backend is ready; keeping main window hidden in tray");
+                            let _ = window.hide();
+                        } else {
+                            reveal_window(&window).unwrap();
+                        }
                         setup_completed.store(true, Ordering::SeqCst);
                         setup_running.store(false, Ordering::SeqCst);
                     });
@@ -2104,7 +2136,7 @@ __ALAS_TITLEBAR_SCRIPT__
     }
 }
 
-fn initialize_splash(splash: &WebviewWindow) {
+fn initialize_splash(splash: &WebviewWindow, show_window: bool) {
     match Url::parse(SPLASH_URL) {
         Ok(url) => {
             if let Err(e) = splash.navigate(url) {
@@ -2113,8 +2145,10 @@ fn initialize_splash(splash: &WebviewWindow) {
             if !wait_for_splash_ready(splash, Duration::from_secs(2)) {
                 warn!("Timed out waiting for splash page readiness; showing splash anyway");
             }
-            if let Err(e) = splash.show() {
-                error!("Failed to show splash window: {:?}", e);
+            if show_window {
+                if let Err(e) = splash.show() {
+                    error!("Failed to show splash window: {:?}", e);
+                }
             }
         }
         Err(e) => {

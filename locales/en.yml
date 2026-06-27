@@ -143,6 +143,11 @@ notify:
   default_body: "You have a new notification"
   open: "Open"
 
+autostart:
+  unsupported: "Autostart is not supported on this platform"
+  query_failed: "Failed to query autostart status: %{error}"
+  set_failed: "Failed to set autostart: %{error}"
+
 errors:
   uv_not_found: "Launcher does not have built-in uv, and uv was not found in system PATH"
   write_uv_failed: "Failed to write built-in uv to %{path}"
