@@ -84,6 +84,8 @@ const DEFAULT_UV_PYTHON_INSTALL_MIRRORS: &[&str] = &[
     "https://registry.npmmirror.com/-/binary/python-build-standalone/",
     "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/",
     "https://python-standalone.org/mirror/astral-sh/python-build-standalone/",
+    "https://downloads.astral.sh/python/",
+    "https://github.com/astral-sh/python-build-standalone/releases/download/",
 ];
 const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
