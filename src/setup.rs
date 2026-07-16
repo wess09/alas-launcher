@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::env::set_current_dir;
 use std::fs;
 use std::io::{BufReader, Read};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -14,7 +15,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::window_util::CreateNoWindow as _;
@@ -86,6 +87,13 @@ const DEFAULT_UV_PYTHON_INSTALL_MIRRORS: &[&str] = &[
     "https://python-standalone.org/mirror/astral-sh/python-build-standalone/",
     "https://downloads.astral.sh/python/",
     "https://github.com/astral-sh/python-build-standalone/releases/download/",
+];
+const DEFAULT_PYPI_INDEX: &str = "https://pypi.org/simple/";
+const BUILTIN_PYPI_INDEXES: &[&str] = &[
+    "https://mirrors.aliyun.com/pypi/simple/",
+    "https://mirrors.cloud.tencent.com/pypi/simple/",
+    "https://repo.huaweicloud.com/repository/pypi/simple/",
+    "https://mirrors.cernet.edu.cn/pypi/web/simple/",
 ];
 const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_uv.bin"));
 
@@ -824,28 +832,45 @@ gm.git_install()
 }
 
 fn uv_sync_project(
-    status_updater: impl FnMut(SplashUpdate),
+    mut status_updater: impl FnMut(SplashUpdate),
     bootstrap_uv: &Path,
     cancel_requested: &AtomicBool,
 ) -> Result<()> {
-    let mirror = deploy_pypi_mirror();
-
     let bootstrap_uv = bootstrap_uv.to_path_buf();
-    run_command_with_retry(
-        move || {
-            let mut cmd = Command::new(&bootstrap_uv);
-            cmd.args(["sync", "--frozen", "--no-dev", "--no-install-project"])
-                .env("UV_NO_PROGRESS", "1")
-                .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
-            if let Some(ref m) = mirror {
-                cmd.args(["--default-index", m]);
+    let indexes = ranked_pypi_indexes();
+    let mut last_error = None;
+
+    for (attempt, index) in indexes.iter().enumerate() {
+        if cancel_requested.load(Ordering::SeqCst) {
+            bail!(t!("setup.cancel_cleaning"));
+        }
+
+        info!("Syncing dependencies with PyPI index: {index}");
+        let mut cmd = Command::new(&bootstrap_uv);
+        cmd.args(["sync", "--frozen", "--no-dev", "--no-install-project"])
+            .args(["--default-index", index])
+            .env("UV_NO_PROGRESS", "1")
+            .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+
+        match run_command(
+            &mut cmd,
+            &mut status_updater,
+            ScriptPhase::Dependencies { total_packages: 0 },
+            cancel_requested,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                warn!("Dependency sync failed with PyPI index {index}: {err}");
+                last_error = Some(err);
+                if attempt + 1 < indexes.len() {
+                    status_updater(pypi_index_fallback_update(&indexes[attempt + 1]));
+                    thread::sleep(RETRY_DELAY);
+                }
             }
-            cmd
-        },
-        status_updater,
-        ScriptPhase::Dependencies { total_packages: 0 },
-        cancel_requested,
-    )
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!(t!("setup.deps_failed").to_string())))
 }
 
 fn migrate_dependency_config() -> Result<()> {
@@ -1017,6 +1042,165 @@ fn deploy_pypi_mirror() -> Option<String> {
         .map(|m| m.to_owned())
 }
 
+fn normalize_pypi_index(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    if trimmed.ends_with('/') {
+        Some(trimmed.to_owned())
+    } else {
+        Some(format!("{trimmed}/"))
+    }
+}
+
+fn pypi_indexes_match(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/')
+        .eq_ignore_ascii_case(right.trim_end_matches('/'))
+}
+
+fn push_unique_pypi_index(indexes: &mut Vec<String>, url: &str) {
+    let Some(index) = normalize_pypi_index(url) else {
+        return;
+    };
+    if !indexes
+        .iter()
+        .any(|existing| pypi_indexes_match(existing, &index))
+    {
+        indexes.push(index);
+    }
+}
+
+fn pypi_index_candidates() -> Vec<String> {
+    let mut indexes = Vec::new();
+    for index in BUILTIN_PYPI_INDEXES {
+        push_unique_pypi_index(&mut indexes, index);
+    }
+    if let Some(index) = deploy_pypi_mirror() {
+        push_unique_pypi_index(&mut indexes, &index);
+    }
+    push_unique_pypi_index(&mut indexes, DEFAULT_PYPI_INDEX);
+    indexes
+}
+
+fn pypi_index_fallback_update(next_index: &str) -> SplashUpdate {
+    SplashUpdate::loading(
+        t!("setup.retrying_deps"),
+        format!("PyPI index: {next_index}"),
+        64,
+    )
+    .with_subtitle(t!("setup.syncing_deps", tip = get_tip()))
+}
+
+fn ranked_pypi_indexes() -> Vec<String> {
+    let indexes = pypi_index_candidates();
+    let handles = indexes
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(order, index)| {
+            thread::spawn(move || {
+                let latency = measure_pypi_index_latency(&index);
+                (order, index, latency)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut probes = Vec::with_capacity(indexes.len());
+    for handle in handles {
+        if let Ok(probe) = handle.join() {
+            probes.push(probe);
+        }
+    }
+
+    for (_, index, latency) in &probes {
+        if let Some(latency) = latency {
+            info!("PyPI index probe {index}: {} ms", latency.as_millis());
+        } else {
+            warn!("PyPI index probe {index}: unavailable");
+        }
+    }
+
+    let fastest = probes
+        .iter()
+        .filter_map(|(order, _, latency)| latency.map(|latency| (*order, latency)))
+        .min_by_key(|(_, latency)| *latency)
+        .map(|(order, _)| order);
+
+    let Some(fastest) = fastest else {
+        warn!("No PyPI index responded to probing; using configured order");
+        return indexes;
+    };
+
+    let fastest_index = indexes[fastest].clone();
+    let mut ranked = vec![fastest_index.clone()];
+    for index in indexes {
+        if !pypi_indexes_match(&index, &fastest_index) {
+            ranked.push(index);
+        }
+    }
+    info!("Fastest PyPI index selected first: {fastest_index}");
+    ranked
+}
+
+fn measure_pypi_index_latency(index: &str) -> Option<Duration> {
+    let host = pypi_index_host(index)?;
+    ping_host_latency(&host).or_else(|| tcp_host_latency(index, &host))
+}
+
+fn pypi_index_host(index: &str) -> Option<String> {
+    let rest = index
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(index);
+    let authority = rest.split('/').next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
+}
+
+fn pypi_index_port(index: &str) -> u16 {
+    if index.starts_with("http://") {
+        80
+    } else {
+        443
+    }
+}
+
+fn ping_host_latency(host: &str) -> Option<Duration> {
+    let mut cmd = Command::new("ping");
+    if cfg!(windows) {
+        cmd.args(["-n", "1", "-w", "1000", host]);
+    } else if cfg!(target_os = "macos") {
+        cmd.args(["-c", "1", "-W", "1000", host]);
+    } else {
+        cmd.args(["-c", "1", "-W", "1", host]);
+    }
+    let start = Instant::now();
+    let status = cmd
+        .create_no_window()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    status.success().then(|| start.elapsed())
+}
+
+fn tcp_host_latency(index: &str, host: &str) -> Option<Duration> {
+    let port = pypi_index_port(index);
+    let address = format!("{host}:{port}");
+    let start = Instant::now();
+    for addr in address.to_socket_addrs().ok()? {
+        if TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
+            return Some(start.elapsed());
+        }
+    }
+    None
+}
+
 fn ensure_deploy_python_dependencies(
     bootstrap_uv: &Path,
     cancel_requested: &AtomicBool,
@@ -1034,37 +1218,46 @@ fn ensure_deploy_python_dependencies(
         return Ok(());
     }
 
-    let mut cmd = Command::new(bootstrap_uv);
-    status_updater(runtime_tools_update(
-        t!("setup.preparing_env"),
-        t!("setup.installing_requests"),
-        15,
-    ));
-    cmd.args(["pip", "install", "--python"])
-        .arg(venv_python())
-        .arg("requests")
-        .env("UV_NO_PROGRESS", "1")
-        .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
-    if let Some(mirror) = deploy_pypi_mirror() {
-        cmd.args(["--default-index", &mirror]);
-    }
-    let mut elapsed_ticks = 0u16;
-    let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
-        elapsed_ticks = elapsed_ticks.saturating_add(1);
-        if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
-            status_updater(runtime_wait_update(
-                &t!("setup.preparing_env"),
-                &t!("setup.installing_requests"),
-                elapsed_ticks,
-                15,
-                16,
-            ));
+    let indexes = ranked_pypi_indexes();
+    for (attempt, index) in indexes.iter().enumerate() {
+        status_updater(runtime_tools_update(
+            t!("setup.preparing_env"),
+            t!("setup.installing_requests"),
+            15,
+        ));
+        info!("Installing requests with PyPI index: {index}");
+        let mut cmd = Command::new(bootstrap_uv);
+        cmd.args(["pip", "install", "--python"])
+            .arg(venv_python())
+            .arg("requests")
+            .args(["--default-index", index])
+            .env("UV_NO_PROGRESS", "1")
+            .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+
+        let mut elapsed_ticks = 0u16;
+        let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
+            elapsed_ticks = elapsed_ticks.saturating_add(1);
+            if elapsed_ticks == 1 || elapsed_ticks % 10 == 0 {
+                status_updater(runtime_wait_update(
+                    &t!("setup.preparing_env"),
+                    &t!("setup.installing_requests"),
+                    elapsed_ticks,
+                    15,
+                    16,
+                ));
+            }
+        })?;
+        if status.success() {
+            return Ok(());
         }
-    })?;
-    if !status.success() {
-        bail!(t!("errors.requests_install_failed"));
+
+        warn!("Failed to install requests with PyPI index: {index}");
+        if attempt + 1 < indexes.len() {
+            thread::sleep(RETRY_DELAY);
+        }
     }
-    Ok(())
+
+    bail!(t!("errors.requests_install_failed"));
 }
 
 fn uv_python_env(cmd: &mut Command) {
