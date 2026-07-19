@@ -1,12 +1,14 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::env::set_current_dir;
 use std::fs;
 use std::io::{BufReader, Read};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -847,10 +849,15 @@ fn uv_sync_project(
 
         info!("Syncing dependencies with PyPI index: {index}");
         let mut cmd = Command::new(&bootstrap_uv);
-        cmd.args(["sync", "--frozen", "--no-dev", "--no-install-project"])
+        cmd.args(["pip", "sync"])
+            .arg("--python")
+            .arg(venv_python())
+            .arg("pyproject.toml")
             .args(["--default-index", index])
+            .arg("--no-config")
             .env("UV_NO_PROGRESS", "1")
             .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+        ignore_uv_index_env(&mut cmd);
 
         match run_command(
             &mut cmd,
@@ -1094,13 +1101,17 @@ fn pypi_index_fallback_update(next_index: &str) -> SplashUpdate {
 
 fn ranked_pypi_indexes() -> Vec<String> {
     let indexes = pypi_index_candidates();
+    let client = pypi_probe_http_client();
     let handles = indexes
         .iter()
         .cloned()
         .enumerate()
         .map(|(order, index)| {
+            let client = client.clone();
             thread::spawn(move || {
-                let latency = measure_pypi_index_latency(&index);
+                let latency = client
+                    .as_ref()
+                    .and_then(|client| measure_pypi_index_latency(client, &index));
                 (order, index, latency)
             })
         })
@@ -1121,21 +1132,33 @@ fn ranked_pypi_indexes() -> Vec<String> {
         }
     }
 
-    let fastest = probes
+    let mut ranked_probe_orders = probes
         .iter()
         .filter_map(|(order, _, latency)| latency.map(|latency| (*order, latency)))
-        .min_by_key(|(_, latency)| *latency)
-        .map(|(order, _)| order);
+        .collect::<Vec<_>>();
+    ranked_probe_orders.sort_by_key(|(order, latency)| (*latency, *order));
 
-    let Some(fastest) = fastest else {
+    let Some((fastest, _)) = ranked_probe_orders.first().copied() else {
         warn!("No PyPI index responded to probing; using configured order");
         return indexes;
     };
 
     let fastest_index = indexes[fastest].clone();
-    let mut ranked = vec![fastest_index.clone()];
+    let mut ranked: Vec<String> = Vec::with_capacity(indexes.len());
+    for (order, _) in ranked_probe_orders {
+        let index = &indexes[order];
+        if !ranked
+            .iter()
+            .any(|existing| pypi_indexes_match(existing, index))
+        {
+            ranked.push(index.clone());
+        }
+    }
     for index in indexes {
-        if !pypi_indexes_match(&index, &fastest_index) {
+        if !ranked
+            .iter()
+            .any(|existing| pypi_indexes_match(existing, &index))
+        {
             ranked.push(index);
         }
     }
@@ -1143,62 +1166,43 @@ fn ranked_pypi_indexes() -> Vec<String> {
     ranked
 }
 
-fn measure_pypi_index_latency(index: &str) -> Option<Duration> {
-    let host = pypi_index_host(index)?;
-    ping_host_latency(&host).or_else(|| tcp_host_latency(index, &host))
+fn pypi_probe_http_client() -> Option<Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static("AzurPilot Launcher PyPI probe"),
+    );
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html,application/vnd.pypi.simple.v1+html,*/*;q=0.8"),
+    );
+
+    Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .redirect(Policy::limited(5))
+        .default_headers(headers)
+        .build()
+        .ok()
 }
 
-fn pypi_index_host(index: &str) -> Option<String> {
-    let rest = index
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(index);
-    let authority = rest.split('/').next()?;
-    let host = authority.rsplit('@').next()?.split(':').next()?.trim();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_owned())
-    }
-}
-
-fn pypi_index_port(index: &str) -> u16 {
-    if index.starts_with("http://") {
-        80
-    } else {
-        443
-    }
-}
-
-fn ping_host_latency(host: &str) -> Option<Duration> {
-    let mut cmd = Command::new("ping");
-    if cfg!(windows) {
-        cmd.args(["-n", "1", "-w", "1000", host]);
-    } else if cfg!(target_os = "macos") {
-        cmd.args(["-c", "1", "-W", "1000", host]);
-    } else {
-        cmd.args(["-c", "1", "-W", "1", host]);
-    }
+fn measure_pypi_index_latency(client: &Client, index: &str) -> Option<Duration> {
     let start = Instant::now();
-    let status = cmd
-        .create_no_window()
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
-    status.success().then(|| start.elapsed())
+    let response = client.head(index).send().ok()?;
+    response.status().is_success().then(|| start.elapsed())
 }
 
-fn tcp_host_latency(index: &str, host: &str) -> Option<Duration> {
-    let port = pypi_index_port(index);
-    let address = format!("{host}:{port}");
-    let start = Instant::now();
-    for addr in address.to_socket_addrs().ok()? {
-        if TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
-            return Some(start.elapsed());
-        }
+fn ignore_uv_index_env(cmd: &mut Command) {
+    for key in [
+        "UV_INDEX",
+        "UV_DEFAULT_INDEX",
+        "UV_INDEX_URL",
+        "UV_EXTRA_INDEX_URL",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+    ] {
+        cmd.env_remove(key);
     }
-    None
 }
 
 fn ensure_deploy_python_dependencies(
@@ -1231,8 +1235,10 @@ fn ensure_deploy_python_dependencies(
             .arg(venv_python())
             .arg("requests")
             .args(["--default-index", index])
+            .arg("--no-config")
             .env("UV_NO_PROGRESS", "1")
             .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
+        ignore_uv_index_env(&mut cmd);
 
         let mut elapsed_ticks = 0u16;
         let status = run_status_command_with_tick(&mut cmd, cancel_requested, || {
