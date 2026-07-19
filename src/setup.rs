@@ -848,13 +848,10 @@ fn uv_sync_project(
         }
 
         info!("Syncing dependencies with PyPI index: {index}");
+        remove_uv_lock_for_resolve()?;
         let mut cmd = Command::new(&bootstrap_uv);
-        cmd.args(["pip", "sync"])
-            .arg("--python")
-            .arg(venv_python())
-            .arg("pyproject.toml")
+        cmd.args(["sync", "--no-dev", "--no-install-project"])
             .args(["--default-index", index])
-            .arg("--no-config")
             .env("UV_NO_PROGRESS", "1")
             .env("UV_PYTHON_INSTALL_DIR", venv_python_install_dir());
         ignore_uv_index_env(&mut cmd);
@@ -878,6 +875,17 @@ fn uv_sync_project(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!(t!("setup.deps_failed").to_string())))
+}
+
+fn remove_uv_lock_for_resolve() -> Result<()> {
+    let lock_path = Path::new("uv.lock");
+    if !lock_path.exists() {
+        return Ok(());
+    }
+    clear_readonly(lock_path)?;
+    fs::remove_file(lock_path).context("Failed to remove uv.lock before dependency resolution")?;
+    info!("Removed uv.lock so uv can regenerate dependency artifact URLs");
+    Ok(())
 }
 
 fn migrate_dependency_config() -> Result<()> {
