@@ -88,12 +88,14 @@ const SPLASH_URL: &str = "http://alas-splash.localhost/";
 #[cfg(not(any(windows, target_os = "android")))]
 const SPLASH_URL: &str = "alas-splash://localhost/";
 const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
-const LAUNCHER_UPDATE_URL: &str = "https://alas.nanoda.work/updata/stable.json";
+const LAUNCHER_UPDATE_URL: &str = env!("LAUNCHER_UPDATE_URL");
 const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
 const MINI_LAUNCHER_VERSION: &str = "0.0.1";
 const LAUNCHER_UPDATE_MIN_PARALLEL_BYTES: u64 = 4 * 1024 * 1024;
 const LAUNCHER_UPDATE_MAX_CHUNK_BYTES: u64 = 500 * 1024;
 const LAUNCHER_UPDATE_MIN_CHUNK_BYTES: u64 = 64 * 1024;
+const LAUNCHER_UPDATE_MTLS_IDENTITY: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/launcher_mtls_identity.pem"));
 const LAUNCHER_UPDATE_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 AZURPILOT_LAUNCHER_UPDATE/2.0.4";
 #[cfg(windows)]
 const LAUNCHER_UPDATE_NO_CONSOLE_ENV: &str = "AZURPILOT_NO_ATTACH_CONSOLE";
@@ -342,11 +344,17 @@ fn launcher_update_browser_headers() -> HeaderMap {
     headers
 }
 
-fn launcher_update_http_client(timeout: Option<Duration>) -> Result<Client> {
+fn launcher_update_http_client(
+    timeout: Option<Duration>,
+    with_mtls_identity: bool,
+) -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .no_proxy()
         .default_headers(launcher_update_browser_headers());
+    if with_mtls_identity && !LAUNCHER_UPDATE_MTLS_IDENTITY.is_empty() {
+        builder = builder.identity(reqwest::Identity::from_pem(LAUNCHER_UPDATE_MTLS_IDENTITY)?);
+    }
     builder = match timeout {
         Some(timeout) => builder.timeout(timeout),
         None => builder.timeout(None),
@@ -368,7 +376,7 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
     let current_version = env!("CARGO_PKG_VERSION");
     let mini_launcher = launcher_version_is_mini(current_version);
     let platform_key = launcher_update_platform_key();
-    let manifest_client = match launcher_update_http_client(Some(Duration::from_secs(10))) {
+    let manifest_client = match launcher_update_http_client(Some(Duration::from_secs(10)), false) {
         Ok(client) => client,
         Err(err) => {
             warn!("Unable to create launcher update client: {err:#}");
@@ -494,7 +502,8 @@ fn download_launcher_update(
     expected_sha256: &str,
     mut status_updater: impl FnMut(SplashUpdate),
 ) -> Result<()> {
-    let client = launcher_update_http_client(None)?;
+    // The public manifest supplies the payload URL; ESA requires mTLS for the payload itself.
+    let client = launcher_update_http_client(None, true)?;
     info!("Downloading launcher update from {url}");
     let probe = launcher_update_probe(&client, url);
     let downloaded = if let Some(total_bytes) = probe.total_bytes {

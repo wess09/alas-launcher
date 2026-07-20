@@ -141,6 +141,10 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Build
+        env:
+          ALAS_LAUNCHER_MTLS_IDENTITY_PEM_B64: ${{ secrets.ALAS_LAUNCHER_MTLS_IDENTITY_PEM_B64 }}
+          REQUIRE_LAUNCHER_MTLS_IDENTITY: "1"
+          LAUNCHER_UPDATE_URL: ${{ secrets.LAUNCHER_NEW_UPDATE_URL }}
         run: cargo build --verbose --release
       - name: Get git
         uses: knicknic/os-specific-run@v1.0.3
@@ -445,7 +449,7 @@ jobs:
             AP-CN-${{ runner.os }}-*
             AzurPilot_Setup_*.exe
 
-  deploy-launcher-update:
+  deploy-launcher-update-legacy:
     if: github.ref_type == 'tag'
     needs: package
     runs-on: ubuntu-latest
@@ -557,3 +561,158 @@ jobs:
             mv -f '${INCOMING}/unpack/stable.json' '${DEPLOY_PATH}/stable.json'
             rm -rf '${INCOMING}'
           "
+
+  deploy-launcher-update:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.R2_REGION }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_PREFIX: ${{ secrets.R2_PREFIX }}
+      R2_REGION: ${{ secrets.R2_REGION }}
+      NEW_UPDATE_URL: ${{ secrets.LAUNCHER_NEW_UPDATE_URL }}
+      NEW_PAYLOAD_BASE_URL: ${{ secrets.LAUNCHER_NEW_PAYLOAD_BASE_URL }}
+      NEW_MANIFEST_DEPLOY_ROOT: ${{ secrets.NEW_MANIFEST_DEPLOY_ROOT }}
+    steps:
+      - name: Download launcher updater payloads
+        uses: actions/download-artifact@v4
+        with:
+          pattern: launcher-updater-*
+          merge-multiple: true
+          path: launcher-updater
+      - name: Prepare versioned launcher updater payloads
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import datetime
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          version = os.environ["VERSION"].strip()
+          if version.startswith("v"):
+              version = version[1:]
+
+          manifest_url = os.environ["NEW_UPDATE_URL"].rstrip("/")
+          if not manifest_url.endswith("/stable.json"):
+              raise SystemExit("LAUNCHER_NEW_UPDATE_URL must end with /stable.json")
+          base_url = f'{os.environ["NEW_PAYLOAD_BASE_URL"].rstrip("/")}/{version}'
+          source_root = Path("launcher-updater")
+          target_root = Path("launcher-updater-r2")
+          if target_root.exists():
+              shutil.rmtree(target_root)
+          target_root.mkdir(parents=True, exist_ok=True)
+
+          files = sorted(
+              p for p in source_root.glob("alas-launcher-*")
+              if p.is_file() and p.name != "stable.json"
+          )
+          if not files:
+              raise SystemExit("No launcher payloads found in launcher-updater/")
+
+          def versioned_name(name: str) -> str:
+              if name.endswith(".exe"):
+                  return f"{name[:-4]}-{version}.exe"
+              return f"{name}-{version}"
+
+          platforms = {}
+          for file_path in files:
+              name = file_path.name
+              key = name[len("alas-launcher-"):]
+              if key.endswith(".exe"):
+                  key = key[:-4]
+              dest_name = versioned_name(name)
+              dest_path = target_root / dest_name
+              shutil.copy2(file_path, dest_path)
+              digest = hashlib.sha256(dest_path.read_bytes()).hexdigest()
+              platforms[key] = {
+                  "url": f"{base_url}/{dest_name}",
+                  "sha256": digest,
+              }
+
+          manifest = {
+              "version": version,
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+              "notes": f"Launcher auto update {version}",
+              "platforms": platforms,
+          }
+          (target_root / "stable.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+          print(f"Publishing mTLS manifest to {manifest_url}")
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+      - name: Upload versioned payloads to R2
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          root="launcher-updater-r2"
+          for file in "${root}"/alas-launcher-*; do
+            [ -f "${file}" ] || continue
+            name="$(basename "${file}")"
+            aws s3 cp "${file}" "s3://${R2_BUCKET}/${R2_PREFIX}/${version}/${name}" \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --region "${R2_REGION}" \
+              --cache-control "public, max-age=31536000, immutable" \
+              --only-show-errors
+          done
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Trust deployment host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Upload new manifest to OpenResty path
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.NEW_MANIFEST_DEPLOY_ROOT }}/updata
+        run: |
+          set -eu
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
+          scp -q -P "${DEPLOY_PORT}" launcher-updater-r2/stable.json "${REMOTE}:${DEPLOY_PATH}/stable.json"
+      - name: Delete superseded R2 payload versions
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          r2_prefix="${R2_PREFIX%/}"
+          current_prefix="${r2_prefix}/${version}/"
+          version_prefixes="$(
+            aws s3api list-objects-v2 \
+              --bucket "${R2_BUCKET}" \
+              --prefix "${r2_prefix}/" \
+              --delimiter "/" \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --region "${R2_REGION}" \
+              --query 'CommonPrefixes[].Prefix' \
+              --output text
+          )"
+          [ -n "${version_prefixes}" ] || exit 0
+          printf '%s\n' "${version_prefixes}" | tr '\t' '\n' | while IFS= read -r version_prefix; do
+            [ -n "${version_prefix}" ] || continue
+            [ "${version_prefix}" = "None" ] && continue
+            [ "${version_prefix}" = "${current_prefix}" ] && continue
+            case "${version_prefix}" in
+              "${r2_prefix}/"*/) ;;
+              *) echo "Refusing to delete unexpected R2 prefix: ${version_prefix}" >&2; exit 1 ;;
+            esac
+            aws s3 rm "s3://${R2_BUCKET}/${version_prefix}" \
+              --recursive \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --region "${R2_REGION}" \
+              --only-show-errors
+          done
