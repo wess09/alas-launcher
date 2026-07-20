@@ -681,7 +681,7 @@ jobs:
         run: |
           set -eu
           REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "sudo -n mkdir -p '${DEPLOY_PATH}' && sudo -n chown '${DEPLOY_USER}' '${DEPLOY_PATH}'"
           scp -q -P "${DEPLOY_PORT}" launcher-updater-r2/stable.json "${REMOTE}:${DEPLOY_PATH}/stable.json"
       - name: Delete superseded R2 payload versions
         env:
