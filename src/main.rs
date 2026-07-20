@@ -17,13 +17,13 @@ use std::{
     cell::Cell,
     collections::HashMap,
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     thread::{self},
     time::{Duration, Instant},
@@ -34,11 +34,7 @@ use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use reqwest::{
     blocking::Client,
-    header::{
-        HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_LENGTH, CONTENT_RANGE, DATE,
-        RANGE, USER_AGENT,
-    },
-    StatusCode,
+    header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, DATE, USER_AGENT},
 };
 use rust_i18n::t;
 use serde::Deserialize;
@@ -91,9 +87,6 @@ const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
 const LAUNCHER_UPDATE_URL: &str = env!("LAUNCHER_UPDATE_URL");
 const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
 const MINI_LAUNCHER_VERSION: &str = "0.0.1";
-const LAUNCHER_UPDATE_MIN_PARALLEL_BYTES: u64 = 4 * 1024 * 1024;
-const LAUNCHER_UPDATE_MAX_CHUNK_BYTES: u64 = 500 * 1024;
-const LAUNCHER_UPDATE_MIN_CHUNK_BYTES: u64 = 64 * 1024;
 const LAUNCHER_UPDATE_MTLS_IDENTITY: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/launcher_mtls_identity.pem"));
 const LAUNCHER_UPDATE_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 AZURPILOT_LAUNCHER_UPDATE/2.0.4";
@@ -137,12 +130,6 @@ struct LauncherUpdateManifest {
 struct LauncherUpdatePlatform {
     url: String,
     sha256: String,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct LauncherUpdateProbe {
-    total_bytes: Option<u64>,
-    supports_ranges: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -505,43 +492,8 @@ fn download_launcher_update(
     // The public manifest supplies the payload URL; ESA requires mTLS for the payload itself.
     let client = launcher_update_http_client(None, true)?;
     info!("Downloading launcher update from {url}");
-    let probe = launcher_update_probe(&client, url);
-    let downloaded = if let Some(total_bytes) = probe.total_bytes {
-        if total_bytes >= LAUNCHER_UPDATE_MIN_PARALLEL_BYTES && probe.supports_ranges {
-            match download_launcher_update_parallel(
-                &client,
-                url,
-                update_path,
-                total_bytes,
-                &mut status_updater,
-            ) {
-                Ok(downloaded) => downloaded,
-                Err(err) => {
-                    warn!(
-                        "Parallel launcher update download failed, falling back to sequential: {err:#}"
-                    );
-                    let _ = fs::remove_file(update_path);
-                    download_launcher_update_sequential(
-                        &client,
-                        url,
-                        update_path,
-                        Some(total_bytes),
-                        &mut status_updater,
-                    )?
-                }
-            }
-        } else {
-            download_launcher_update_sequential(
-                &client,
-                url,
-                update_path,
-                Some(total_bytes),
-                &mut status_updater,
-            )?
-        }
-    } else {
-        download_launcher_update_sequential(&client, url, update_path, None, &mut status_updater)?
-    };
+    let downloaded =
+        download_launcher_update_sequential(&client, url, update_path, None, &mut status_updater)?;
 
     status_updater(
         SplashUpdate::loading(
@@ -568,83 +520,6 @@ fn download_launcher_update(
         update_path.display()
     );
     Ok(())
-}
-
-fn launcher_update_probe(client: &Client, url: &str) -> LauncherUpdateProbe {
-    let head_total = launcher_update_head_content_length(client, url);
-    let range_probe = launcher_update_range_probe(client, url);
-
-    LauncherUpdateProbe {
-        total_bytes: head_total.or(range_probe.total_bytes),
-        supports_ranges: range_probe.supports_ranges,
-    }
-}
-
-fn launcher_update_head_content_length(client: &Client, url: &str) -> Option<u64> {
-    let response = match client.head(url).send() {
-        Ok(response) => response,
-        Err(err) => {
-            warn!("Unable to probe launcher update size with HEAD: {err:#}");
-            return None;
-        }
-    };
-
-    if !response.status().is_success() {
-        warn!(
-            "Launcher update HEAD probe returned unexpected status: {}",
-            response.status()
-        );
-        return None;
-    }
-
-    response
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-}
-
-fn launcher_update_range_probe(client: &Client, url: &str) -> LauncherUpdateProbe {
-    let response = match client.get(url).header(RANGE, "bytes=0-0").send() {
-        Ok(response) => response,
-        Err(err) => {
-            warn!("Unable to probe launcher update range support: {err:#}");
-            return LauncherUpdateProbe {
-                total_bytes: None,
-                supports_ranges: false,
-            };
-        }
-    };
-
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        warn!(
-            "Launcher update range probe returned unexpected status: {}",
-            response.status()
-        );
-        return LauncherUpdateProbe {
-            total_bytes: None,
-            supports_ranges: false,
-        };
-    }
-
-    let total_bytes = response
-        .headers()
-        .get(CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(content_range_total_bytes);
-
-    LauncherUpdateProbe {
-        total_bytes,
-        supports_ranges: true,
-    }
-}
-
-fn content_range_total_bytes(value: &str) -> Option<u64> {
-    value
-        .rsplit_once('/')
-        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
-        .filter(|total| *total > 0)
 }
 
 fn download_launcher_update_sequential(
@@ -714,305 +589,6 @@ fn download_launcher_update_sequential(
     }
 
     Ok(downloaded)
-}
-
-fn download_launcher_update_parallel(
-    client: &Client,
-    url: &str,
-    update_path: &Path,
-    total_bytes: u64,
-    status_updater: &mut impl FnMut(SplashUpdate),
-) -> Result<u64> {
-    let worker_limit = launcher_update_parallel_threads();
-    let worker_count = launcher_update_worker_count(total_bytes, worker_limit);
-    let file = fs::File::create(update_path).with_context(|| {
-        t!(
-            "errors.write_update_failed",
-            error = update_path.display().to_string()
-        )
-    })?;
-    file.set_len(total_bytes).with_context(|| {
-        t!(
-            "errors.write_update_failed",
-            error = update_path.display().to_string()
-        )
-    })?;
-    drop(file);
-
-    info!(
-        "Downloading launcher update with {} dynamic range workers",
-        worker_count
-    );
-    let next_start = Arc::new(AtomicU64::new(0));
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let cancel_requested = Arc::new(AtomicBool::new(false));
-    let started_at = Instant::now();
-    let (result_tx, result_rx) = mpsc::channel::<Result<()>>();
-
-    thread::scope(|scope| {
-        for index in 0..worker_count {
-            let client = client.clone();
-            let url = url.to_owned();
-            let update_path = update_path.to_path_buf();
-            let next_start = next_start.clone();
-            let downloaded = downloaded.clone();
-            let cancel_requested = cancel_requested.clone();
-            let result_tx = result_tx.clone();
-            scope.spawn(move || {
-                let result = download_launcher_update_worker(
-                    &client,
-                    &url,
-                    &update_path,
-                    total_bytes,
-                    worker_count,
-                    &next_start,
-                    &downloaded,
-                    &cancel_requested,
-                )
-                .with_context(|| format!("launcher update dynamic worker {} failed", index + 1));
-                let _ = result_tx.send(result);
-            });
-        }
-        drop(result_tx);
-        monitor_launcher_parallel_download(
-            total_bytes,
-            &downloaded,
-            &cancel_requested,
-            started_at,
-            worker_count,
-            &result_rx,
-            status_updater,
-        )
-    })
-}
-
-fn download_launcher_update_worker(
-    client: &Client,
-    url: &str,
-    update_path: &Path,
-    total_bytes: u64,
-    worker_count: usize,
-    next_start: &AtomicU64,
-    downloaded: &AtomicU64,
-    cancel_requested: &AtomicBool,
-) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .open(update_path)
-        .with_context(|| {
-            t!(
-                "errors.write_update_failed",
-                error = update_path.display().to_string()
-            )
-        })?;
-    let mut buffer = [0u8; 128 * 1024];
-
-    while !cancel_requested.load(Ordering::Relaxed) {
-        let Some((start, end)) =
-            launcher_update_next_range(total_bytes, worker_count, next_start, downloaded)
-        else {
-            break;
-        };
-        download_launcher_update_range(
-            client,
-            url,
-            &mut file,
-            start,
-            end,
-            downloaded,
-            cancel_requested,
-            &mut buffer,
-        )
-        .with_context(|| format!("range bytes={start}-{end} failed"))?;
-    }
-
-    Ok(())
-}
-
-fn launcher_update_next_range(
-    total_bytes: u64,
-    worker_count: usize,
-    next_start: &AtomicU64,
-    downloaded: &AtomicU64,
-) -> Option<(u64, u64)> {
-    loop {
-        let start = next_start.load(Ordering::Relaxed);
-        if start >= total_bytes {
-            return None;
-        }
-
-        let chunk_size = launcher_update_chunk_size(
-            total_bytes,
-            start,
-            downloaded.load(Ordering::Relaxed),
-            worker_count,
-        );
-        let end = (start + chunk_size - 1).min(total_bytes - 1);
-        let next = end + 1;
-
-        if next_start
-            .compare_exchange(start, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return Some((start, end));
-        }
-    }
-}
-
-fn launcher_update_chunk_size(
-    total_bytes: u64,
-    next_start: u64,
-    downloaded: u64,
-    worker_count: usize,
-) -> u64 {
-    let remaining_unassigned = total_bytes.saturating_sub(next_start);
-    if remaining_unassigned <= LAUNCHER_UPDATE_MIN_CHUNK_BYTES {
-        return remaining_unassigned.max(1);
-    }
-
-    let remaining_download = total_bytes.saturating_sub(downloaded);
-    let target_chunks = (worker_count as u64).saturating_mul(2).max(1);
-    let adaptive = remaining_download.div_ceil(target_chunks).clamp(
-        LAUNCHER_UPDATE_MIN_CHUNK_BYTES,
-        LAUNCHER_UPDATE_MAX_CHUNK_BYTES,
-    );
-
-    adaptive.min(remaining_unassigned).max(1)
-}
-
-fn download_launcher_update_range(
-    client: &Client,
-    url: &str,
-    file: &mut fs::File,
-    start: u64,
-    end: u64,
-    downloaded: &AtomicU64,
-    cancel_requested: &AtomicBool,
-    buffer: &mut [u8],
-) -> Result<()> {
-    let range = format!("bytes={start}-{end}");
-    let mut response = client
-        .get(url)
-        .header(RANGE, range)
-        .send()
-        .with_context(|| t!("errors.download_update_failed", url = url))?;
-
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(anyhow!(
-            "range request returned unexpected status: {}",
-            response.status()
-        ));
-    }
-
-    file.seek(SeekFrom::Start(start))
-        .with_context(|| t!("errors.write_update_failed", error = start.to_string()))?;
-
-    let expected_len = end - start + 1;
-    let mut written = 0u64;
-    while written < expected_len && !cancel_requested.load(Ordering::Relaxed) {
-        let size = response
-            .read(buffer)
-            .with_context(|| t!("errors.download_update_failed", url = url))?;
-        if size == 0 {
-            break;
-        }
-
-        let remaining = (expected_len - written) as usize;
-        if size > remaining {
-            return Err(anyhow!(
-                "range response exceeded expected length: expected {} bytes, got at least {} bytes",
-                expected_len,
-                written + size as u64
-            ));
-        }
-
-        file.write_all(&buffer[..size])
-            .with_context(|| t!("errors.write_update_failed", error = start.to_string()))?;
-        written += size as u64;
-        downloaded.fetch_add(size as u64, Ordering::Relaxed);
-    }
-
-    if cancel_requested.load(Ordering::Relaxed) {
-        return Ok(());
-    }
-
-    if written != expected_len {
-        return Err(anyhow!(
-            "range response incomplete: expected {} bytes, got {} bytes",
-            expected_len,
-            written
-        ));
-    }
-
-    Ok(())
-}
-
-fn monitor_launcher_parallel_download(
-    total_bytes: u64,
-    downloaded: &AtomicU64,
-    cancel_requested: &AtomicBool,
-    started_at: Instant,
-    worker_count: usize,
-    result_rx: &mpsc::Receiver<Result<()>>,
-    status_updater: &mut impl FnMut(SplashUpdate),
-) -> Result<u64> {
-    let mut finished_workers = 0usize;
-    let mut last_reported_progress = 8u8;
-    let mut last_reported_at = Instant::now() - Duration::from_secs(1);
-
-    while finished_workers < worker_count {
-        match result_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(())) => finished_workers += 1,
-            Ok(Err(err)) => {
-                cancel_requested.store(true, Ordering::Relaxed);
-                return Err(err);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                cancel_requested.store(true, Ordering::Relaxed);
-                return Err(anyhow!("launcher update worker channel disconnected"));
-            }
-        }
-
-        let current = downloaded.load(Ordering::Relaxed).min(total_bytes);
-        let (progress, detail) =
-            launcher_download_progress_detail(current, Some(total_bytes), started_at);
-        if progress > last_reported_progress
-            || last_reported_at.elapsed() >= Duration::from_millis(250)
-        {
-            last_reported_progress = progress;
-            last_reported_at = Instant::now();
-            status_updater(
-                SplashUpdate::loading(t!("launcher_update.updating"), detail, progress)
-                    .with_subtitle(t!("launcher_update.status")),
-            );
-        }
-    }
-
-    let downloaded = downloaded.load(Ordering::Relaxed);
-    if downloaded != total_bytes {
-        return Err(anyhow!(
-            "launcher update download incomplete: expected {} bytes, got {} bytes",
-            total_bytes,
-            downloaded
-        ));
-    }
-
-    Ok(downloaded)
-}
-
-fn launcher_update_parallel_threads() -> usize {
-    thread::available_parallelism()
-        .map(|parallelism| parallelism.get().saturating_mul(2))
-        .unwrap_or(16)
-        .clamp(16, 128)
-}
-
-fn launcher_update_worker_count(total_bytes: u64, max_workers: usize) -> usize {
-    total_bytes
-        .div_ceil(LAUNCHER_UPDATE_MIN_CHUNK_BYTES)
-        .max(1)
-        .min(max_workers as u64) as usize
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
