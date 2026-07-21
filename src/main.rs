@@ -29,6 +29,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    backend::{ManagedBackend, WebuiLaunchConfig},
+    launcher_control::start_launcher_control_stream,
+    notify::{start_notify_stream, NotificationClickHandler},
+    setup::{
+        cleanup_runtime_for_rebuild, get_deploy_config, setup_alas_repo, setup_environment,
+        SplashUpdate,
+    },
+};
 use anyhow::{anyhow, Context, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::{DateTime, FixedOffset, Local, Utc};
@@ -55,16 +64,6 @@ use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
-use crate::{
-    backend::{ManagedBackend, WebuiLaunchConfig},
-    launcher_control::start_launcher_control_stream,
-    notify::{start_notify_stream, NotificationClickHandler},
-    setup::{
-        cleanup_runtime_for_rebuild, get_deploy_config, setup_alas_repo, setup_environment,
-        SplashUpdate,
-    },
-};
-
 #[cfg(target_os = "macos")]
 const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
 #[cfg(target_os = "macos")]
@@ -84,6 +83,8 @@ const SPLASH_URL: &str = "http://alas-splash.localhost/";
 #[cfg(not(any(windows, target_os = "android")))]
 const SPLASH_URL: &str = "alas-splash://localhost/";
 const TIME_BOMB_CONFIG_SOURCE: &str = include_str!("../Cargo.toml");
+#[cfg(test)]
+const TAURI_CONFIG_SOURCE: &str = include_str!("../tauri.conf.json");
 const LAUNCHER_UPDATE_URL: &str = env!("LAUNCHER_UPDATE_URL");
 const LAUNCHER_UPDATE_SKIP_ENV: &str = "AZURPILOT_SKIP_LAUNCHER_UPDATE";
 const MINI_LAUNCHER_VERSION: &str = "0.0.1";
@@ -948,6 +949,53 @@ mod tests {
         assert!(html.contains(r#""defaultTip":"Sakura Empire's cherry blossoms"#));
         assert!(!html.contains("const defaultTip = '"));
         assert!(html.contains("window.__ALAS_SPLASH_READY = true;"));
+    }
+
+    #[test]
+    fn test_titlebars_use_webview_draggable_regions_for_touch_dragging() {
+        let splash_html = splash_redesigned_shell_html("light", "dark");
+
+        assert!(splash_html.contains("touch-action: none;"));
+        assert!(splash_html.contains("addEventListener('pointerdown'"));
+        assert!(splash_html.contains("-webkit-app-region: drag;"));
+        assert!(splash_html.contains("-webkit-app-region: no-drag;"));
+        assert!(splash_html.contains("webviewDraggableRegionsEnabled"));
+        assert!(splash_html.contains("if (webviewDraggableRegionsEnabled) {"));
+        assert!(!splash_html.contains("$NATIVE_TOUCH_DRAG"));
+
+        #[cfg(windows)]
+        assert!(splash_html.contains("const webviewDraggableRegionsEnabled = true;"));
+
+        #[cfg(not(target_os = "macos"))]
+        let titlebar_script = main_window_titlebar_injection_script();
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(titlebar_script.contains("touch-action:none"));
+            assert!(titlebar_script.contains("addEventListener('pointerdown'"));
+            assert!(titlebar_script.contains("-webkit-app-region:drag"));
+            assert!(titlebar_script.contains("-webkit-app-region:no-drag"));
+            assert!(titlebar_script.contains("webviewDraggableRegionsEnabled"));
+            assert!(titlebar_script.contains("if (webviewDraggableRegionsEnabled)"));
+            #[cfg(windows)]
+            assert!(titlebar_script.contains("const webviewDraggableRegionsEnabled = true;"));
+        }
+    }
+
+    #[test]
+    fn test_windows_enable_webview_draggable_regions() {
+        let config: serde_json::Value =
+            serde_json::from_str(TAURI_CONFIG_SOURCE).expect("valid config");
+        let windows = config["app"]["windows"].as_array().expect("window configs");
+
+        for window in windows {
+            let args = window["additionalBrowserArgs"]
+                .as_str()
+                .expect("draggable regions arguments");
+            assert!(args.contains("msWebView2EnableDraggableRegions"));
+            assert!(args.contains("ElasticOverscroll"));
+            assert!(args.contains("msWebOOUI,msPdfOOUI,msSmartScreenProtection"));
+        }
     }
 }
 
@@ -1948,163 +1996,255 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 <style>
   :root {{
     color-scheme: light;
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --border: #d9e2ee;
-    --text: #182230;
-    --muted: #5f6f84;
-    --danger: #c03434;
-    --danger-bg: #fff1f1;
-    --primary: #1f66ad;
-    --primary-hover: #18558f;
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-soft: #f8fafb;
+    --line: #e5e9ee;
+    --text: #17212b;
+    --muted: #687582;
+    --accent: #176b67;
+    --accent-hover: #105854;
+    --accent-soft: #e8f4f2;
+    --danger: #b64545;
+    --danger-soft: #fff1f0;
   }}
   * {{
     box-sizing: border-box;
   }}
   html, body {{
+    width: 100%;
     min-height: 100%;
     margin: 0;
-    font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    font-family: "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
     color: var(--text);
     background: var(--bg);
   }}
   body {{
-    display: grid;
-    place-items: center;
-    padding: 72px 28px 32px;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 72px 44px 44px;
+    background-image: linear-gradient(90deg, rgba(23, 33, 43, 0.025) 1px, transparent 1px), linear-gradient(rgba(23, 33, 43, 0.025) 1px, transparent 1px);
+    background-size: 32px 32px;
+    animation: page-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }}
   .panel {{
-    width: min(680px, 100%);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--panel);
-    box-shadow: 0 18px 44px rgba(21, 35, 54, 0.10);
-    padding: 32px;
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    width: min(820px, 100%);
+    min-height: 390px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 0 20px 48px rgba(23, 33, 43, 0.11), 0 2px 6px rgba(23, 33, 43, 0.04);
+    animation: panel-in 520ms cubic-bezier(0.22, 1, 0.36, 1) 70ms both;
   }}
-  .mark {{
-    width: 38px;
-    height: 38px;
-    border-radius: 8px;
+  .signal {{
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent);
+    color: #fff;
+  }}
+  .signal::before, .signal::after {{
+    content: "";
+    position: absolute;
+    border: 1px solid rgba(255, 255, 255, 0.17);
+    border-radius: 50%;
+    opacity: 0;
+    animation: signal-expand 3.2s ease-out infinite;
+  }}
+  .signal::before {{ width: 76px; height: 76px; }}
+  .signal::after {{ width: 76px; height: 76px; animation-delay: 1.6s; }}
+  .signal-core {{
+    position: relative;
+    z-index: 1;
+    width: 76px;
+    height: 76px;
     display: grid;
     place-items: center;
-    background: var(--danger-bg);
-    color: var(--danger);
-    border: 1px solid #f0caca;
-    font-size: 24px;
-    line-height: 1;
-    font-weight: 600;
-    margin-bottom: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    animation: core-breathe 2.8s ease-in-out infinite;
+  }}
+  .signal-core svg {{
+    width: 36px;
+    height: 36px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+  }}
+  .content {{
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 38px 42px 32px;
+    animation: content-in 500ms cubic-bezier(0.22, 1, 0.36, 1) 140ms both;
+  }}
+  .eyebrow {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }}
+  .eyebrow::before {{
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 0 4px var(--danger-soft);
+    animation: status-pulse 2s ease-in-out infinite;
   }}
   h1 {{
-    margin: 0;
-    font-size: 28px;
-    font-weight: 600;
-    line-height: 1.2;
+    max-width: 470px;
+    margin: 16px 0 0;
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.3px;
+    line-height: 1.18;
   }}
   .lead {{
+    max-width: 510px;
     margin: 12px 0 0;
     color: var(--muted);
-    font-size: 15px;
-    line-height: 1.7;
+    font-size: 14px;
+    line-height: 1.65;
   }}
   .details {{
     margin: 24px 0 0;
-    border: 1px solid var(--border);
+    border: 1px solid var(--line);
     border-radius: 8px;
     overflow: hidden;
-    background: #fbfdff;
+    background: var(--surface-soft);
   }}
   .row {{
     display: grid;
-    grid-template-columns: 72px minmax(0, 1fr);
+    grid-template-columns: 70px minmax(0, 1fr);
     gap: 14px;
-    padding: 13px 16px;
-    border-top: 1px solid var(--border);
-    font-size: 13px;
-    line-height: 1.55;
+    padding: 10px 13px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    line-height: 1.5;
   }}
-  .row:first-child {{
-    border-top: 0;
-  }}
-  .label {{
-    color: var(--muted);
-  }}
+  .row:first-child {{ border-top: 0; }}
+  .label {{ color: var(--muted); }}
   .value {{
     min-width: 0;
     overflow-wrap: anywhere;
+    color: var(--text);
     font-family: Consolas, "SFMono-Regular", Menlo, monospace;
   }}
   .actions {{
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 9px;
     flex-wrap: wrap;
-    margin-top: 24px;
+    margin-top: auto;
+    padding-top: 24px;
   }}
-  .action-button {{
-    min-height: 38px;
+  button {{
+    min-height: 36px;
     border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 0 16px;
+    border-radius: 7px;
+    padding: 0 13px;
     font: inherit;
-    font-size: 14px;
+    font-size: 12px;
+    font-weight: 600;
     cursor: pointer;
-    color: #ffffff;
-    background: var(--primary);
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+    will-change: transform;
   }}
-  .action-button:hover {{
-    background: var(--primary-hover);
+  button:hover {{ transform: translateY(-1px); }}
+  button:active {{ transform: translateY(0); }}
+  .action-button {{
+    color: #fff;
+    background: var(--accent);
   }}
-  .action-button:disabled {{
-    cursor: default;
-    opacity: 0.65;
+  .action-button:hover {{ background: var(--accent-hover); }}
+  .secondary-button {{
+    color: var(--accent);
+    border-color: #c5dfdc;
+    background: var(--accent-soft);
   }}
+  .secondary-button:hover {{ background: #dcefeb; border-color: #a8d2cd; }}
+  button:disabled {{ cursor: default; opacity: 0.55; }}
+  button:disabled:hover {{ transform: none; }}
   .status {{
-    min-height: 20px;
+    flex: 1 1 100%;
+    min-height: 18px;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
   }}
-  @media (max-width: 560px) {{
-    body {{
-      padding: 64px 16px 22px;
-      place-items: start stretch;
-    }}
-    .panel {{
-      padding: 24px;
-    }}
-    h1 {{
-      font-size: 23px;
-    }}
-    .row {{
-      grid-template-columns: 1fr;
-      gap: 4px;
-    }}
-    .action-button {{
-      width: 100%;
-    }}
+  .footer {{
+    margin-top: 16px;
+    color: #9aa5ae;
+    font-size: 11px;
+  }}
+  @media (max-width: 680px) {{
+    body {{ padding: 62px 18px 24px; align-items: flex-start; }}
+    .panel {{ grid-template-columns: 1fr; min-height: 0; }}
+    .signal {{ min-height: 120px; }}
+    .signal::before {{ width: 76px; height: 76px; }}
+    .signal::after {{ width: 76px; height: 76px; }}
+    .content {{ padding: 28px 24px 24px; }}
+    h1 {{ font-size: 25px; }}
+    .actions {{ margin-top: 22px; }}
+    button {{ flex: 1 1 auto; }}
+  }}
+  @media (max-width: 420px) {{
+    .row {{ grid-template-columns: 1fr; gap: 3px; }}
+    button {{ width: 100%; }}
+  }}
+  @keyframes page-in {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+  @keyframes panel-in {{ from {{ opacity: 0; transform: translateY(12px) scale(0.985); }} to {{ opacity: 1; transform: translateY(0) scale(1); }} }}
+  @keyframes content-in {{ from {{ opacity: 0; transform: translateX(10px); }} to {{ opacity: 1; transform: translateX(0); }} }}
+  @keyframes signal-expand {{ 0% {{ opacity: 0.72; transform: scale(0.72); }} 68% {{ opacity: 0.12; }} 100% {{ opacity: 0; transform: scale(2.8); }} }}
+  @keyframes core-breathe {{ 0%, 100% {{ transform: scale(1); }} 50% {{ transform: scale(1.045); }} }}
+  @keyframes status-pulse {{ 0%, 100% {{ opacity: 0.62; }} 50% {{ opacity: 1; }} }}
+  @media (prefers-reduced-motion: reduce) {{
+    *, *::before, *::after {{ animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }}
   }}
 </style>
 </head>
 <body>
   <main class="panel">
-    <div class="mark">!</div>
-    <h1>{heading}</h1>
-    <p class="lead">{description}</p>
-    <section class="details" aria-label="{connection_info}">
-      <div class="row">
-        <div class="label">{address}</div>
-        <div id="backend-url" class="value"></div>
+    <div class="signal" aria-hidden="true">
+      <div class="signal-core">
+        <svg viewBox="0 0 24 24"><path d="M12 8v4m0 4h.01"/><path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
       </div>
-      <div class="row">
-        <div class="label">{error_label}</div>
-        <div id="error-detail" class="value"></div>
+    </div>
+    <div class="content">
+      <div class="eyebrow">{error_label}</div>
+      <h1>{heading}</h1>
+      <p class="lead">{description}</p>
+      <section class="details" aria-label="{connection_info}">
+        <div class="row">
+          <div class="label">{address}</div>
+          <div id="backend-url" class="value"></div>
+        </div>
+        <div class="row">
+          <div class="label">{error_label}</div>
+          <div id="error-detail" class="value"></div>
+        </div>
+      </section>
+      <div class="actions">
+        <button id="retry-button" class="action-button" type="button">{retry}</button>
+        <button id="gui-log-button" class="secondary-button" type="button">{download_gui_log}</button>
+        <button id="launcher-log-button" class="secondary-button" type="button">{download_launcher_log}</button>
+        <span id="retry-status" class="status"></span>
       </div>
-    </section>
-    <div class="actions">
-      <button id="retry-button" class="action-button" type="button">{retry}</button>
-      <button id="gui-log-button" class="action-button" type="button">{download_gui_log}</button>
-      <button id="launcher-log-button" class="action-button" type="button">{download_launcher_log}</button>
-      <span id="retry-status" class="status"></span>
+      <div class="footer">AzurPilot · {connection_info}</div>
     </div>
   </main>
   <script>
@@ -2284,6 +2424,9 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     align-items: center;
     min-height: 60px;
     padding: 18px 24px;
+    touch-action: none;
+    app-region: drag;
+    -webkit-app-region: drag;
   }
   .brand-zone {
     display: flex;
@@ -2348,6 +2491,12 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     align-items: center;
     gap: 8px;
     flex: 0 0 auto;
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
+  }
+  .window-controls * {
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
   }
   .win-btn {
     width: 13px;
@@ -2678,6 +2827,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     const invoke =
       (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
       || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+    const webviewDraggableRegionsEnabled = $NATIVE_TOUCH_DRAG;
 
     window.addEventListener('contextmenu', event => {
       event.preventDefault();
@@ -2743,15 +2893,21 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
       }
     };
 
-    document.getElementById('splash-drag-region').addEventListener('mousedown', event => {
-      if (event.button !== 0 || event.target.closest('button')) {
+    const splashDragRegion = document.getElementById('splash-drag-region');
+    splashDragRegion.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0 || event.target.closest('button')) {
         return;
       }
-      if (typeof invoke === 'function') {
-        invoke('window_start_dragging').catch(error => {
-          console.error('Failed to drag splash window', error);
-        });
+      if (webviewDraggableRegionsEnabled) {
+        return;
       }
+      event.preventDefault();
+      if (typeof invoke !== 'function') {
+        return;
+      }
+      invoke('window_start_dragging').catch(error => {
+        console.error('Failed to drag splash window', error);
+      });
     });
 
     document.getElementById('window-minimize').addEventListener('click', event => {
@@ -2798,6 +2954,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     .replace("$DARK_BG", dark_bg_b64)
     .replace("$LAUNCHER_VERSION", env!("CARGO_PKG_VERSION"))
     .replace("$I18N_JSON", &i18n_json)
+    .replace("$NATIVE_TOUCH_DRAG", if cfg!(windows) { "true" } else { "false" })
     .replace("$I18N_INITIALIZING", &escape_html(t!("splash.initializing")))
     .replace("$I18N_MINIMIZE", &escape_html(t!("titlebar.minimize")))
     .replace("$I18N_CLOSE", &escape_html(t!("titlebar.close")))
@@ -2959,9 +3116,14 @@ fn main_window_titlebar_injection_script() -> String {
             "maximizeLabelText": t!("titlebar.maximize_window"),
         });
         let i18n_json = serde_json::to_string(&i18n).unwrap();
-        let mut s = String::with_capacity(4096);
+        let mut s = String::with_capacity(8192);
         s.push_str("const i18n = ");
         s.push_str(&i18n_json);
+        s.push_str(if cfg!(windows) {
+            ";const webviewDraggableRegionsEnabled = true;"
+        } else {
+            ";const webviewDraggableRegionsEnabled = false;"
+        });
         s.push_str(r#";
         const invoke =
             (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
@@ -2976,7 +3138,7 @@ fn main_window_titlebar_injection_script() -> String {
             if (!document.getElementById('alas-launcher-titlebar-style')) {
                 const style = document.createElement('style');
                 style.id = 'alas-launcher-titlebar-style';
-                style.textContent = ':root{--alas-titlebar-height:44px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--alas-titlebar-height);z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 120px 0 0;height:100%;pointer-events:auto;background:transparent}.header-icon{display:flex;align-items:center;gap:8px;padding:0 12px;position:absolute;top:0;right:0;height:100%;pointer-events:auto}.icon{width:12px;height:12px;border-radius:50%;border:none;cursor:pointer;flex:0 0 auto;position:relative;transition:filter 120ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:active{filter:brightness(0.85)}.icon-hide{background:#3b82f6;box-shadow:0 0 0 .5px #2563eb}.icon-close{background:#ff5f57;box-shadow:0 0 0 .5px #e0443e}.icon-minimize{background:#febc2e;box-shadow:0 0 0 .5px #d4a017}.icon-maximize{background:#28c840;box-shadow:0 0 0 .5px #14ae35}.icon svg{width:7px;height:7px;stroke:rgba(0,0,0,.72);fill:none;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:opacity 150ms ease}.header-icon:hover .icon svg{opacity:1}@media(max-width:680px){.alas-titlebar-drag-zone{inset-right:88px}}';
+                style.textContent = ':root{--alas-titlebar-height:44px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--alas-titlebar-height);z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 120px 0 0;height:100%;pointer-events:auto;background:transparent;touch-action:none;app-region:drag;-webkit-app-region:drag}.header-icon,.header-icon *{app-region:no-drag;-webkit-app-region:no-drag}.header-icon{display:flex;align-items:center;gap:8px;padding:0 12px;position:absolute;top:0;right:0;height:100%;pointer-events:auto}.icon{width:12px;height:12px;border-radius:50%;border:none;cursor:pointer;flex:0 0 auto;position:relative;transition:filter 120ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:active{filter:brightness(0.85)}.icon-hide{background:#3b82f6;box-shadow:0 0 0 .5px #2563eb}.icon-close{background:#ff5f57;box-shadow:0 0 0 .5px #e0443e}.icon-minimize{background:#febc2e;box-shadow:0 0 0 .5px #d4a017}.icon-maximize{background:#28c840;box-shadow:0 0 0 .5px #14ae35}.icon svg{width:7px;height:7px;stroke:rgba(0,0,0,.72);fill:none;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:opacity 150ms ease}.header-icon:hover .icon svg{opacity:1}@media(max-width:680px){.alas-titlebar-drag-zone{inset-right:88px}}';
                 document.head.appendChild(style);
             }
             const titlebar = document.createElement('div');
@@ -3014,8 +3176,10 @@ fn main_window_titlebar_injection_script() -> String {
                     }
                 });
             });
-            dragZone.addEventListener('mousedown', event => {
-                if (event.button !== 0 || event.target.closest('button')) return;
+            dragZone.addEventListener('pointerdown', event => {
+                if (!event.isPrimary || event.button !== 0 || event.target.closest('button')) return;
+                if (webviewDraggableRegionsEnabled) return;
+                event.preventDefault();
                 invoke('window_start_dragging').catch(error => { console.error('Failed to start dragging from titlebar', error); });
             });
             dragZone.addEventListener('dblclick', async event => {
