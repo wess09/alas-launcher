@@ -9,3 +9,6 @@
 .DS_Store
 AzurLaneAutoScript.app/
 证书.txt
+
+# Source font used to generate the tracked launcher subset.
+/fonts/MiSansVF.ttf

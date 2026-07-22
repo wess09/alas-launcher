@@ -53,5 +53,12 @@ openssl-probe = "0.1.6"
 notify-rust = "4.16.1"
 
 [profile.release]
-strip = true
-lto = true
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = 0
+incremental = false
+debug-assertions = false
+overflow-checks = false

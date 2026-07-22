@@ -54,12 +54,10 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
     webview::{PageLoadEvent, PageLoadPayload},
-    Manager, Url, WebviewWindow,
+    Manager, State, Url, WebviewWindow,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_dialog::FilePath;
-#[cfg(windows)]
-use tauri_plugin_dialog::MessageDialogButtons;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
@@ -70,8 +68,8 @@ const MENUBAR_ICON_2X: &[u8] = include_bytes!("../icons/menubar@2x.png");
 const MENUBAR_ICON_1X: &[u8] = include_bytes!("../icons/menubar.png");
 #[cfg(windows)]
 const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
-const SPLASH_BG_LIGHT: &[u8] = include_bytes!("../bg/l_bg.webp");
-const SPLASH_BG_DARK: &[u8] = include_bytes!("../bg/b_bg.webp");
+const SPLASH_BG_VIDEO: &[u8] = include_bytes!("../bg/bg.mp4");
+const MI_SANS_FONT: &[u8] = include_bytes!("../fonts/MiSansLauncher.ttf");
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const BACKEND_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(windows, target_os = "android"))]
@@ -113,6 +111,8 @@ const PREVIEW_CRASH_ARGS: &[&str] = &[
     "/preview-error",
 ];
 const START_MINIMIZED_ARGS: &[&str] = &["--start-minimized", "/start-minimized"];
+
+struct ExitControl(Arc<AtomicBool>);
 
 #[derive(Clone, Debug)]
 struct TimeBombConfig {
@@ -944,16 +944,20 @@ mod tests {
     fn test_english_splash_i18n_uses_json_literals() {
         rust_i18n::set_locale("en");
 
-        let html = splash_redesigned_shell_html("light", "dark");
+        let html = splash_redesigned_shell_html("video", "font");
 
         assert!(html.contains(r#""defaultTip":"Sakura Empire's cherry blossoms"#));
         assert!(!html.contains("const defaultTip = '"));
         assert!(html.contains("window.__ALAS_SPLASH_READY = true;"));
+        assert!(html.contains("data:video/mp4;base64,video"));
+        assert!(html.contains("font-family: \"MiSans\""));
+        assert!(html.contains("data:font/ttf;base64,font"));
+        assert!(!html.contains("text-transform: uppercase;"));
     }
 
     #[test]
     fn test_titlebars_use_webview_draggable_regions_for_touch_dragging() {
-        let splash_html = splash_redesigned_shell_html("light", "dark");
+        let splash_html = splash_redesigned_shell_html("video", "font");
 
         assert!(splash_html.contains("touch-action: none;"));
         assert!(splash_html.contains("addEventListener('pointerdown'"));
@@ -977,6 +981,12 @@ mod tests {
             assert!(titlebar_script.contains("-webkit-app-region:no-drag"));
             assert!(titlebar_script.contains("webviewDraggableRegionsEnabled"));
             assert!(titlebar_script.contains("if (webviewDraggableRegionsEnabled)"));
+            assert!(titlebar_script.contains("min-height:12px"));
+            assert!(titlebar_script.contains("alas-close-menu"));
+            assert!(!titlebar_script.contains("alas-close-optics"));
+            assert!(!titlebar_script.contains("alas-island-open"));
+            assert!(titlebar_script.contains("__ALAS_OPEN_CLOSE_PROMPT"));
+            assert!(titlebar_script.contains("window_exit_application"));
             #[cfg(windows)]
             assert!(titlebar_script.contains("const webviewDraggableRegionsEnabled = true;"));
         }
@@ -1063,8 +1073,6 @@ fn main() -> Result<()> {
     let setup_completed = Arc::new(AtomicBool::new(false));
     let startup_cleanup_started = Arc::new(AtomicBool::new(false));
     let recreating_main_window = Arc::new(AtomicBool::new(false));
-    #[cfg(windows)]
-    let close_prompt_active = Arc::new(AtomicBool::new(false));
 
     let allow_exit_for_setup = allow_exit.clone();
     let launch_blocked_for_setup = launch_blocked.clone();
@@ -1073,8 +1081,6 @@ fn main() -> Result<()> {
     let recreating_main_window_for_run = recreating_main_window.clone();
     let launch_blocked_for_run = launch_blocked.clone();
     let start_minimized_for_run = start_minimized;
-    #[cfg(windows)]
-    let close_prompt_active_for_run = close_prompt_active.clone();
 
     info!("Starting Webview...");
     tauri::Builder::default()
@@ -1082,6 +1088,7 @@ fn main() -> Result<()> {
             backend_error_response(request)
         })
         .register_uri_scheme_protocol("alas-splash", |_ctx, _request| splash_response())
+        .manage(ExitControl(allow_exit.clone()))
         .invoke_handler(tauri::generate_handler![
             save_as,
             download_today_gui_log,
@@ -1091,6 +1098,7 @@ fn main() -> Result<()> {
             window_minimize,
             window_toggle_maximize,
             window_close,
+            window_exit_application,
             window_start_dragging,
             window_is_maximized
         ])
@@ -1496,46 +1504,20 @@ fn main() -> Result<()> {
                         return;
                     }
 
-                    // Windows: ask whether to quit or minimize to tray.
+                    // Windows: show the in-window close chooser instead of a native dialog.
                     #[cfg(windows)]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            if close_prompt_active_for_run
-                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                                .is_ok()
-                            {
-                                let app_handle_for_dialog = app_handle.clone();
-                                let allow_exit_for_dialog = allow_exit.clone();
-                                let close_prompt_active_for_dialog =
-                                    close_prompt_active_for_run.clone();
-
-                                if let Some(main_window) = app_handle.get_webview_window("main") {
-                                    app_handle
-                                        .dialog()
-                                        .message(t!("dialog.confirm_exit"))
-                                        .title(t!("dialog.exit"))
-                                        .buttons(MessageDialogButtons::OkCancelCustom(
-                                            t!("dialog.exit").to_string(),
-                                            t!("dialog.minimize_to_tray").to_string(),
-                                        ))
-                                        .parent(&main_window)
-                                        .show(move |should_exit| {
-                                            close_prompt_active_for_dialog
-                                                .store(false, Ordering::SeqCst);
-                                            if should_exit {
-                                                allow_exit_for_dialog.store(true, Ordering::SeqCst);
-                                                app_handle_for_dialog.exit(0);
-                                            } else {
-                                                minimize_main_window_to_tray(
-                                                    &app_handle_for_dialog,
-                                                );
-                                            }
-                                        });
-                                } else {
-                                    close_prompt_active_for_run.store(false, Ordering::SeqCst);
+                            if let Some(main_window) = app_handle.get_webview_window("main") {
+                                if let Err(err) = main_window.eval(
+                                    "if (typeof window.__ALAS_OPEN_CLOSE_PROMPT !== 'function') { throw new Error('close prompt is unavailable'); } window.__ALAS_OPEN_CLOSE_PROMPT();",
+                                ) {
+                                    warn!("Unable to open close chooser: {err:?}");
                                     minimize_main_window_to_tray(&app_handle);
                                 }
+                            } else {
+                                minimize_main_window_to_tray(&app_handle);
                             }
                             return;
                         }
@@ -1708,6 +1690,16 @@ fn window_close(window: WebviewWindow) -> tauri::Result<()> {
 }
 
 #[tauri::command]
+fn window_exit_application(
+    app_handle: tauri::AppHandle,
+    exit_control: State<'_, ExitControl>,
+) -> tauri::Result<()> {
+    exit_control.0.store(true, Ordering::SeqCst);
+    app_handle.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 fn window_start_dragging(window: WebviewWindow) -> tauri::Result<()> {
     window.start_dragging()
 }
@@ -1718,11 +1710,29 @@ fn window_is_maximized(window: WebviewWindow) -> tauri::Result<bool> {
 }
 
 #[tauri::command]
-fn retry_backend_connection(window: WebviewWindow, port: u16) -> std::result::Result<bool, String> {
-    navigate_backend_or_error(&window, port).map_err(|e| {
-        error!("Failed to retry backend connection: {:?}", e);
-        e.to_string()
+async fn retry_backend_connection(
+    window: WebviewWindow,
+    port: u16,
+) -> std::result::Result<bool, String> {
+    let connected = tauri::async_runtime::spawn_blocking(move || {
+        wait_for_backend_connection(port, BACKEND_NAVIGATION_TIMEOUT).is_ok()
     })
+    .await
+    .map_err(|e| {
+        error!("Backend retry task failed: {e:?}");
+        e.to_string()
+    })?;
+
+    if !connected {
+        return Ok(false);
+    }
+
+    let url = Url::parse(&backend_url(port)).map_err(|e| e.to_string())?;
+    window.navigate(url).map_err(|e| {
+        error!("Failed to navigate to reconnected backend: {e:?}");
+        e.to_string()
+    })?;
+    Ok(true)
 }
 
 fn page_load_injector(webview: WebviewWindow, payload: PageLoadPayload<'_>) {
@@ -1823,14 +1833,14 @@ fn backend_url(port: u16) -> String {
 }
 
 fn splash_response() -> tauri::http::Response<Vec<u8>> {
-    let light_bg_b64 = BASE64_STANDARD.encode(SPLASH_BG_LIGHT);
-    let dark_bg_b64 = BASE64_STANDARD.encode(SPLASH_BG_DARK);
+    let video_bg_b64 = BASE64_STANDARD.encode(SPLASH_BG_VIDEO);
+    let mi_sans_font_b64 = BASE64_STANDARD.encode(MI_SANS_FONT);
     tauri::http::Response::builder()
         .header(
             tauri::http::header::CONTENT_TYPE,
             "text/html; charset=utf-8",
         )
-        .body(splash_redesigned_shell_html(&light_bg_b64, &dark_bg_b64).into_bytes())
+        .body(splash_redesigned_shell_html(&video_bg_b64, &mi_sans_font_b64).into_bytes())
         .unwrap()
 }
 
@@ -1967,6 +1977,8 @@ fn escape_html(input: impl AsRef<str>) -> String {
 fn backend_error_html(port: u16, error_detail: &str) -> String {
     let backend_url_json = to_string(&backend_url(port)).unwrap();
     let error_detail_json = to_string(error_detail).unwrap();
+    let mi_sans_font_b64 = BASE64_STANDARD.encode(MI_SANS_FONT);
+    let splash_video_b64 = BASE64_STANDARD.encode(SPLASH_BG_VIDEO);
     let titlebar_script = main_window_titlebar_injection_script();
     let i18n = serde_json::json!({
         "title": t!("error_page.title"),
@@ -1994,6 +2006,13 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
+  @font-face {{
+    font-family: "MiSans";
+    src: url(data:font/ttf;base64,{mi_sans_font_b64}) format("truetype");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }}
   :root {{
     color-scheme: light;
     --bg: #f4f6f8;
@@ -2015,9 +2034,11 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     width: 100%;
     min-height: 100%;
     margin: 0;
-    font-family: "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    font-family: "MiSans", sans-serif;
+    font-weight: 420;
+    font-synthesis: none;
     color: var(--text);
-    background: var(--bg);
+    background: #dfe7ea;
   }}
   body {{
     min-height: 100vh;
@@ -2025,11 +2046,32 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     align-items: center;
     justify-content: center;
     padding: 72px 44px 44px;
-    background-image: linear-gradient(90deg, rgba(23, 33, 43, 0.025) 1px, transparent 1px), linear-gradient(rgba(23, 33, 43, 0.025) 1px, transparent 1px);
-    background-size: 32px 32px;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background: transparent;
     animation: page-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }}
+  .error-background-video {{
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.9;
+    pointer-events: none;
+  }}
+  .error-background-scrim {{
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: rgba(244, 247, 248, 0.36);
+    pointer-events: none;
+  }}
   .panel {{
+    position: relative;
+    z-index: 2;
     display: grid;
     grid-template-columns: 190px minmax(0, 1fr);
     width: min(820px, 100%);
@@ -2037,7 +2079,8 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 14px;
-    background: var(--surface);
+    background: rgba(255, 255, 255, 0.76);
+    backdrop-filter: blur(22px) saturate(1.08);
     box-shadow: 0 20px 48px rgba(23, 33, 43, 0.11), 0 2px 6px rgba(23, 33, 43, 0.04);
     animation: panel-in 520ms cubic-bezier(0.22, 1, 0.36, 1) 70ms both;
   }}
@@ -2093,7 +2136,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     gap: 8px;
     color: var(--muted);
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 620;
     letter-spacing: 1.2px;
     text-transform: uppercase;
   }}
@@ -2110,7 +2153,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     max-width: 470px;
     margin: 16px 0 0;
     font-size: 30px;
-    font-weight: 650;
+    font-weight: 680;
     letter-spacing: -0.3px;
     line-height: 1.18;
   }}
@@ -2119,6 +2162,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     margin: 12px 0 0;
     color: var(--muted);
     font-size: 14px;
+    font-weight: 430;
     line-height: 1.65;
   }}
   .details {{
@@ -2135,6 +2179,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     padding: 10px 13px;
     border-top: 1px solid var(--line);
     font-size: 12px;
+    font-weight: 460;
     line-height: 1.5;
   }}
   .row:first-child {{ border-top: 0; }}
@@ -2143,7 +2188,9 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     min-width: 0;
     overflow-wrap: anywhere;
     color: var(--text);
-    font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+    font-family: inherit;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }}
   .actions {{
     display: flex;
@@ -2185,11 +2232,13 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     min-height: 18px;
     color: var(--muted);
     font-size: 12px;
+    font-weight: 460;
   }}
   .footer {{
     margin-top: 16px;
     color: #9aa5ae;
     font-size: 11px;
+    font-weight: 430;
   }}
   @media (max-width: 680px) {{
     body {{ padding: 62px 18px 24px; align-items: flex-start; }}
@@ -2218,6 +2267,10 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
 </style>
 </head>
 <body>
+  <video class="error-background-video" autoplay muted loop playsinline preload="auto" aria-hidden="true">
+    <source src="data:video/mp4;base64,{splash_video_b64}" type="video/mp4">
+  </video>
+  <div class="error-background-scrim" aria-hidden="true"></div>
   <main class="panel">
     <div class="signal" aria-hidden="true">
       <div class="signal-core">
@@ -2332,7 +2385,7 @@ fn backend_error_html(port: u16, error_detail: &str) -> String {
     )
 }
 
-fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String {
+fn splash_redesigned_shell_html(video_bg_b64: &str, mi_sans_font_b64: &str) -> String {
     let i18n = serde_json::json!({
         "defaultTip": t!("tips.17"),
         "loading": t!("splash.loading_badge"),
@@ -2353,6 +2406,13 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+  @font-face {
+    font-family: "MiSans";
+    src: url(data:font/ttf;base64,$MI_SANS_FONT) format("truetype");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
   :root {
     --primary-color: #4facfe;
     --secondary-color: #00f2fe;
@@ -2378,7 +2438,9 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     background: #111827;
   }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+    font-family: "MiSans", sans-serif;
+    font-weight: 420;
+    font-synthesis: none;
     color: var(--text-main);
   }
   button {
@@ -2390,25 +2452,29 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     height: 100%;
     overflow: hidden;
     border-radius: 0;
-    background: url(data:image/webp;base64,$LIGHT_BG) center/cover no-repeat;
+    background: #111827;
     box-shadow: none;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
   }
-  @media (prefers-color-scheme: dark) {
-    .launcher-window {
-      background-image: url(data:image/webp;base64,$DARK_BG);
-    }
+  .splash-background-video {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
   }
   .launcher-window::before {
     content: "";
     position: absolute;
     inset: 0;
-    z-index: 0;
+    z-index: 1;
     background:
-      linear-gradient(to bottom, rgba(0, 0, 0, 0.16) 0%, rgba(0, 0, 0, 0.08) 42%, rgba(0, 0, 0, 0.58) 100%),
-      linear-gradient(115deg, rgba(12, 30, 72, 0.22), rgba(255, 126, 117, 0.12));
+      linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.03) 42%, rgba(0, 0, 0, 0.28) 100%),
+      linear-gradient(115deg, rgba(12, 30, 72, 0.10), rgba(255, 126, 117, 0.05));
     pointer-events: none;
   }
   body.error-state .launcher-window::before {
@@ -2437,13 +2503,14 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
   .app-title {
     color: var(--text-main);
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 610;
     letter-spacing: 0;
     text-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
   }
   .app-version {
     color: var(--text-sub);
     font-size: 12px;
+    font-weight: 460;
     line-height: 1;
     background: rgba(255, 255, 255, 0.14);
     border: 1px solid rgba(255, 255, 255, 0.11);
@@ -2471,7 +2538,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     backdrop-filter: blur(12px);
     box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 460;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2580,14 +2647,14 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     color: var(--text-main);
     font-size: 24px;
     line-height: 1.2;
-    font-weight: 650;
+    font-weight: 620;
     letter-spacing: 0;
     text-shadow: 0 2px 10px rgba(0, 0, 0, 0.32);
   }
   .sub-action-text {
     color: var(--text-sub);
     font-size: 12px;
-    font-weight: 650;
+    font-weight: 480;
     letter-spacing: 1.2px;
     line-height: 1.45;
     margin: 0;
@@ -2595,7 +2662,6 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     max-height: 54px;
     overflow: hidden;
     text-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
-    text-transform: uppercase;
     white-space: pre-line;
   }
   .progress-container {
@@ -2641,7 +2707,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     top: -25px;
     color: var(--text-main);
     font-size: 14px;
-    font-weight: 750;
+    font-weight: 680;
     font-variant-numeric: tabular-nums;
     text-shadow: 0 2px 6px rgba(0, 0, 0, 0.32);
   }
@@ -2664,6 +2730,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 460;
     backdrop-filter: blur(7px);
   }
   .footer-right {
@@ -2676,6 +2743,7 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
   .notice-text {
     color: var(--text-muted);
     white-space: nowrap;
+    font-weight: 450;
   }
   .splash-actions {
     display: none;
@@ -2772,6 +2840,9 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
 </head>
 <body>
   <div class="launcher-window">
+    <video class="splash-background-video" autoplay muted loop playsinline preload="auto" aria-hidden="true">
+      <source src="data:video/mp4;base64,$VIDEO_BG" type="video/mp4">
+    </video>
     <div id="splash-drag-region" class="top-bar">
       <div class="brand-zone">
         <span class="app-title">AzurPilot</span>
@@ -2950,8 +3021,8 @@ fn splash_redesigned_shell_html(light_bg_b64: &str, dark_bg_b64: &str) -> String
   </script>
 </body>
 </html>"#
-    .replace("$LIGHT_BG", light_bg_b64)
-    .replace("$DARK_BG", dark_bg_b64)
+    .replace("$VIDEO_BG", video_bg_b64)
+    .replace("$MI_SANS_FONT", mi_sans_font_b64)
     .replace("$LAUNCHER_VERSION", env!("CARGO_PKG_VERSION"))
     .replace("$I18N_JSON", &i18n_json)
     .replace("$NATIVE_TOUCH_DRAG", if cfg!(windows) { "true" } else { "false" })
@@ -3114,15 +3185,18 @@ fn main_window_titlebar_injection_script() -> String {
             "maximizeActionTitle": t!("titlebar.maximize_action"),
             "restoreLabel": t!("titlebar.restore_window"),
             "maximizeLabelText": t!("titlebar.maximize_window"),
+            "closePrompt": t!("dialog.confirm_exit"),
+            "exitAction": t!("dialog.exit"),
+            "minimizeToTrayAction": t!("dialog.minimize_to_tray"),
         });
         let i18n_json = serde_json::to_string(&i18n).unwrap();
         let mut s = String::with_capacity(8192);
         s.push_str("const i18n = ");
         s.push_str(&i18n_json);
         s.push_str(if cfg!(windows) {
-            ";const webviewDraggableRegionsEnabled = true;"
+            ";const webviewDraggableRegionsEnabled = true;const closePromptEnabled = true;"
         } else {
-            ";const webviewDraggableRegionsEnabled = false;"
+            ";const webviewDraggableRegionsEnabled = false;const closePromptEnabled = false;"
         });
         s.push_str(r#";
         const invoke =
@@ -3138,7 +3212,8 @@ fn main_window_titlebar_injection_script() -> String {
             if (!document.getElementById('alas-launcher-titlebar-style')) {
                 const style = document.createElement('style');
                 style.id = 'alas-launcher-titlebar-style';
-                style.textContent = ':root{--alas-titlebar-height:44px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--alas-titlebar-height);z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 120px 0 0;height:100%;pointer-events:auto;background:transparent;touch-action:none;app-region:drag;-webkit-app-region:drag}.header-icon,.header-icon *{app-region:no-drag;-webkit-app-region:no-drag}.header-icon{display:flex;align-items:center;gap:8px;padding:0 12px;position:absolute;top:0;right:0;height:100%;pointer-events:auto}.icon{width:12px;height:12px;border-radius:50%;border:none;cursor:pointer;flex:0 0 auto;position:relative;transition:filter 120ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:active{filter:brightness(0.85)}.icon-hide{background:#3b82f6;box-shadow:0 0 0 .5px #2563eb}.icon-close{background:#ff5f57;box-shadow:0 0 0 .5px #e0443e}.icon-minimize{background:#febc2e;box-shadow:0 0 0 .5px #d4a017}.icon-maximize{background:#28c840;box-shadow:0 0 0 .5px #14ae35}.icon svg{width:7px;height:7px;stroke:rgba(0,0,0,.72);fill:none;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:opacity 150ms ease}.header-icon:hover .icon svg{opacity:1}@media(max-width:680px){.alas-titlebar-drag-zone{inset-right:88px}}';
+                style.textContent = ':root{--alas-titlebar-height:44px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--alas-titlebar-height);z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 120px 0 0;height:100%;pointer-events:auto;background:transparent;touch-action:none;app-region:drag;-webkit-app-region:drag}.header-icon,.header-icon *{app-region:no-drag;-webkit-app-region:no-drag}.header-icon{display:flex;align-items:center;gap:8px;padding:0 12px;position:absolute;top:0;right:0;height:100%;pointer-events:auto}.icon{width:12px;height:12px;min-width:12px;min-height:12px;margin:0;padding:0;line-height:1;border-radius:50%;border:none;cursor:pointer;flex:0 0 auto;position:relative;transition:filter 120ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:active{filter:brightness(0.85)}.icon-hide{background:#3b82f6;box-shadow:0 0 0 .5px #2563eb}.icon-close{background:#ff5f57;box-shadow:0 0 0 .5px #e0443e}.icon-minimize{background:#febc2e;box-shadow:0 0 0 .5px #d4a017}.icon-maximize{background:#28c840;box-shadow:0 0 0 .5px #14ae35}.icon svg{width:7px;height:7px;stroke:rgba(0,0,0,.72);fill:none;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;opacity:0;transition:opacity 150ms ease}.header-icon:hover .icon svg{opacity:1}@media(max-width:680px){.alas-titlebar-drag-zone{inset-right:88px}}';
+                style.textContent += '#alas-close-menu{position:fixed;top:8px;right:8px;z-index:2147483647;width:244px;padding:11px;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:rgba(22,25,31,.92);box-shadow:0 18px 46px rgba(0,0,0,.3);backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25);color:#fff;opacity:0;pointer-events:none;transform:translateY(-14px) scale(.72);transform-origin:calc(100% - 16px) 18px;transition:opacity 160ms ease,transform 220ms cubic-bezier(.2,.9,.25,1);app-region:no-drag;-webkit-app-region:no-drag}#alas-close-menu.is-open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1)}#alas-close-menu *{box-sizing:border-box;app-region:no-drag;-webkit-app-region:no-drag}#alas-close-menu-title{margin:0 0 10px;font:500 12px/1.45 "MiSans",sans-serif;color:rgba(255,255,255,.78)}#alas-close-menu-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}#alas-close-menu button{display:flex;align-items:center;justify-content:center;min-width:0;min-height:34px;margin:0;padding:0 10px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(255,255,255,.1);color:#fff;font:600 12px/1 "MiSans",sans-serif;cursor:pointer;transition:background 120ms ease,transform 120ms ease}#alas-close-menu button:hover{transform:translateY(-1px);background:rgba(255,255,255,.18)}#alas-close-menu button:active{transform:translateY(0)}#alas-close-menu button:disabled{opacity:.55;cursor:default;transform:none}#alas-close-menu .alas-close-confirm{border-color:rgba(255,113,106,.38);background:rgba(202,56,52,.82)}#alas-close-menu .alas-close-confirm:hover{background:rgba(225,68,63,.94)}';
                 document.head.appendChild(style);
             }
             const titlebar = document.createElement('div');
@@ -3148,6 +3223,50 @@ fn main_window_titlebar_injection_script() -> String {
             document.body.prepend(titlebar);
             const dragZone = titlebar.querySelector('.alas-titlebar-drag-zone');
             const maximizeButton = titlebar.querySelector('[data-action="maximize"]');
+            let closeMenu = document.getElementById('alas-close-menu');
+            if (!closeMenu) {
+                closeMenu = document.createElement('div');
+                closeMenu.id = 'alas-close-menu';
+                closeMenu.setAttribute('role', 'dialog');
+                closeMenu.setAttribute('aria-modal', 'false');
+                closeMenu.innerHTML = '<p id="alas-close-menu-title"></p><div id="alas-close-menu-actions"><button type="button" data-close-action="minimize"></button><button type="button" class="alas-close-confirm" data-close-action="exit"></button></div>';
+                closeMenu.querySelector('#alas-close-menu-title').textContent = i18n.closePrompt;
+                closeMenu.querySelector('[data-close-action="minimize"]').textContent = i18n.minimizeToTrayAction;
+                closeMenu.querySelector('[data-close-action="exit"]').textContent = i18n.exitAction;
+                closeMenu.addEventListener('pointerdown', event => event.stopPropagation());
+                document.body.appendChild(closeMenu);
+            }
+            const setCloseMenuOpen = open => {
+                closeMenu.classList.toggle('is-open', open);
+                if (open) closeMenu.querySelector('[data-close-action="minimize"]').focus({ preventScroll: true });
+            };
+            const showClosePrompt = () => {
+                if (!closePromptEnabled) {
+                    invoke('window_close').catch(error => console.error('Failed to close window', error));
+                    return;
+                }
+                setCloseMenuOpen(true);
+            };
+            window.__ALAS_OPEN_CLOSE_PROMPT = showClosePrompt;
+            closeMenu.querySelector('[data-close-action="minimize"]').addEventListener('click', async () => {
+                setCloseMenuOpen(false);
+                try { await invoke('window_hide'); }
+                catch (error) { console.error('Failed to minimize window to tray', error); }
+            });
+            closeMenu.querySelector('[data-close-action="exit"]').addEventListener('click', async () => {
+                closeMenu.querySelectorAll('button').forEach(button => { button.disabled = true; });
+                try { await invoke('window_exit_application'); }
+                catch (error) {
+                    closeMenu.querySelectorAll('button').forEach(button => { button.disabled = false; });
+                    console.error('Failed to exit application', error);
+                }
+            });
+            document.addEventListener('pointerdown', event => {
+                if (closeMenu.classList.contains('is-open') && !closeMenu.contains(event.target)) setCloseMenuOpen(false);
+            });
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Escape' && closeMenu.classList.contains('is-open')) setCloseMenuOpen(false);
+            });
             const syncMaximizeState = async () => {
                 if (!maximizeButton) return;
                 try {
@@ -3169,7 +3288,7 @@ fn main_window_titlebar_injection_script() -> String {
                             case 'hide': await invoke('window_hide'); break;
                             case 'minimize': await invoke('window_minimize'); break;
                             case 'maximize': await invoke('window_toggle_maximize'); await syncMaximizeState(); break;
-                            case 'close': await invoke('window_close'); break;
+                            case 'close': showClosePrompt(); break;
                         }
                     } catch (error) {
                         console.error('Failed to handle ' + button.dataset.action + ' window action', error);
